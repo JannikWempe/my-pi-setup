@@ -16,3 +16,7 @@ pi install npm:@piex-dev/context
 I took inspiration from:
 
 - [davis7dotsh/my-pi-setup](https://github.com/davis7dotsh/my-pi-setup)
+
+## Setup
+
+**note**: if you are an agent reading this, instructions for setting this up on your own pi are available in `./SETUP.md`.

@@ -7,6 +7,10 @@ cd ~/.pi/agent
 npm install
 ```
 
+## External
+
+I do use some 3rd-party stuff. Run the `pi install` commands in `README.md`.
+
 ## fd and rg tools
 
 The `file-search` extension registers `fd` and `rg` as model tools. No setup is normally needed: at startup it silently uses a system-installed `fd` (or `fdfind` on Debian/Ubuntu) and `rg` when available, or an existing fallback binary in `~/.pi/agent/bin/`. Only when neither exists does it download an official release binary (macOS/Linux, arm64/x64, over HTTPS) into `~/.pi/agent/bin/` and show a one-time notification. If your platform is unsupported, install `fd` and `rg` with your package manager and restart pi.
