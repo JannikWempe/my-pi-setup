@@ -20,7 +20,8 @@ mcp-onboarding.json
 
 # skills are mostly managed as  symlinkgs via Vercels skills CLI
 # Pi-specific skills will be explicitly whitelisted here
-skills/
+skills/*
+!skills/background-terminals/
 
 # Environment variables and secrets
 .env
