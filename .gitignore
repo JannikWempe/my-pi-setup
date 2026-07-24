@@ -1,0 +1,41 @@
+# Dependencies
+node_modules/
+
+# Downloaded/generated executables
+bin/
+
+# Pi runtime and private state
+sessions/
+/workflows/
+auth.json
+settings.json
+trust.json
+models-store.json
+*cache.json
+mcp-oauth/
+mcp-onboarding.json
+
+# managed by herdr
+/extensions/herdr-agent-state.ts
+
+# skills are mostly managed as  symlinkgs via Vercels skills CLI
+# Pi-specific skills will be explicitly whitelisted here
+skills/
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Logs and temporary files
+*.log
+*.tmp
+*.swp
+.DS_Store
+
+# Local editor settings
+.vscode/
+.idea/
+/skills/code-review
