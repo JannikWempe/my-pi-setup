@@ -3,6 +3,7 @@ node_modules/
 
 # Downloaded/generated executables
 bin/
+fff/
 
 # Pi runtime and private state
 sessions/

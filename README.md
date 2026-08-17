@@ -9,6 +9,7 @@ pi install npm:pi-web-access
 pi install npm:pi-mcp-adapter
 pi install npm:@juicesharp/rpiv-ask-user-question
 pi install npm:@piex-dev/context
+pi install npm:@ff-labs/pi-fff
 ```
 
 ## Credits
