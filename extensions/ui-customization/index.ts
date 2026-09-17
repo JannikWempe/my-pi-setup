@@ -28,6 +28,15 @@ interface RenderableNode {
   render(width: number): string[];
 }
 
+interface ExpandableTextNode extends RenderableNode {
+  getCollapsedText(): string;
+  getExpandedText(): string;
+  setExpanded(expanded: boolean): void;
+  setText(text: string): void;
+  text: string;
+  skillCategoriesApplied?: boolean;
+}
+
 interface DashboardTui extends RenderableNode {
   requestRender(force?: boolean): void;
 }
@@ -101,12 +110,115 @@ function hasChildren(
   return Array.isArray(component.children);
 }
 
+function stripAnsi(text: string) {
+  return text.replace(ANSI_PATTERN, "");
+}
+
 function renderedText(component: RenderableNode) {
   try {
-    return component.render(200).join("\n").replace(ANSI_PATTERN, "");
+    return stripAnsi(component.render(200).join("\n"));
   } catch {
     return "";
   }
+}
+
+function isExpandableTextNode(
+  component: RenderableNode,
+): component is ExpandableTextNode {
+  const candidate = component as Partial<ExpandableTextNode>;
+  return (
+    typeof candidate.getCollapsedText === "function" &&
+    typeof candidate.getExpandedText === "function" &&
+    typeof candidate.setExpanded === "function" &&
+    typeof candidate.setText === "function" &&
+    typeof candidate.text === "string"
+  );
+}
+
+export function extractModelInvocableSkillNames(systemPrompt: string) {
+  const skillsBlock = systemPrompt.match(
+    /<available_skills>([\s\S]*?)<\/available_skills>/,
+  )?.[1];
+  if (!skillsBlock) return new Set<string>();
+
+  return new Set(
+    [...skillsBlock.matchAll(/<name>([^<]+)<\/name>/g)].map(
+      (match) => match[1]!,
+    ),
+  );
+}
+
+function parseSkillNames(collapsedText: string) {
+  const lines = stripAnsi(collapsedText).split("\n");
+  if (lines[0]?.trim() !== "[Skills]") return [];
+
+  return lines
+    .slice(1)
+    .join(" ")
+    .split(",")
+    .map((name) => name.trim())
+    .filter(Boolean);
+}
+
+export function categorizeSkillsSection(
+  component: RenderableNode,
+  modelInvocableNames: ReadonlySet<string>,
+  labelStyle: (text: string) => string,
+  valueStyle: (text: string) => string,
+) {
+  if (isExpandableTextNode(component)) {
+    if (component.skillCategoriesApplied) return false;
+
+    const getOriginalCollapsedText = component.getCollapsedText.bind(component);
+    const getOriginalExpandedText = component.getExpandedText.bind(component);
+    const originalCollapsed = getOriginalCollapsedText();
+    const skillNames = parseSkillNames(originalCollapsed);
+    if (skillNames.length > 0) {
+      const modelInvocable = skillNames.filter((name) =>
+        modelInvocableNames.has(name),
+      );
+      const userOnly = skillNames.filter(
+        (name) => !modelInvocableNames.has(name),
+      );
+      if (userOnly.length === 0) return false;
+
+      const originalExpanded = getOriginalExpandedText();
+      const wasExpanded = component.text === originalExpanded;
+      const summary = () =>
+        [
+          getOriginalCollapsedText().split("\n", 1)[0]!,
+          `  ${labelStyle("model-invocable")}  ${valueStyle(modelInvocable.join(", ") || "—")}`,
+          `  ${labelStyle("user-only")}        ${valueStyle(userOnly.join(", "))}`,
+        ].join("\n");
+      const expandedDetails = () =>
+        getOriginalExpandedText().split("\n").slice(1).join("\n");
+
+      component.getCollapsedText = summary;
+      component.getExpandedText = () => `${summary()}\n${expandedDetails()}`;
+      component.skillCategoriesApplied = true;
+      component.setText(
+        wasExpanded
+          ? component.getExpandedText()
+          : component.getCollapsedText(),
+      );
+      component.invalidate();
+      return true;
+    }
+  }
+
+  if (!hasChildren(component)) return false;
+  for (const child of component.children) {
+    if (
+      categorizeSkillsSection(
+        child,
+        modelInvocableNames,
+        labelStyle,
+        valueStyle,
+      )
+    )
+      return true;
+  }
+  return false;
 }
 
 function hideThemesSection(component: RenderableNode) {
@@ -180,7 +292,7 @@ export default function uiCustomization(pi: ExtensionAPI) {
   let gitInfo = emptyGitInfoState();
   let requestRender: (() => void) | undefined;
   let activeTui: DashboardTui | undefined;
-  let themeRemovalTimers: Array<ReturnType<typeof setTimeout>> = [];
+  let resourceCustomizationTimers: Array<ReturnType<typeof setTimeout>> = [];
 
   const stopModelListener = pi.events.on(MODEL_INFO_CHANNEL, (value) => {
     if (!isModelInfoState(value)) return;
@@ -194,14 +306,28 @@ export default function uiCustomization(pi: ExtensionAPI) {
     requestRender?.();
   });
 
-  function scheduleThemeRemoval(tui: DashboardTui) {
-    for (const timer of themeRemovalTimers) clearTimeout(timer);
-    themeRemovalTimers = [];
+  function scheduleResourceCustomization(
+    tui: DashboardTui,
+    ctx: ExtensionContext,
+  ) {
+    for (const timer of resourceCustomizationTimers) clearTimeout(timer);
+    resourceCustomizationTimers = [];
 
     for (const delay of [0, 50, 250, 1_000]) {
-      themeRemovalTimers.push(
+      resourceCustomizationTimers.push(
         setTimeout(() => {
-          if (hideThemesSection(tui)) tui.requestRender(true);
+          const modelInvocableNames = extractModelInvocableSkillNames(
+            ctx.getSystemPrompt(),
+          );
+          const skillsChanged = categorizeSkillsSection(
+            tui,
+            modelInvocableNames,
+            (text) => ctx.ui.theme.fg("mdHeading", text),
+            (text) => ctx.ui.theme.fg("dim", text),
+          );
+          if (skillsChanged || hideThemesSection(tui)) {
+            tui.requestRender(true);
+          }
         }, delay),
       );
     }
@@ -213,7 +339,7 @@ export default function uiCustomization(pi: ExtensionAPI) {
     ctx.ui.setHeader((tui) => {
       activeTui = tui;
       requestRender = () => tui.requestRender();
-      scheduleThemeRemoval(tui);
+      scheduleResourceCustomization(tui, ctx);
 
       return {
         render(width: number) {
@@ -311,15 +437,15 @@ export default function uiCustomization(pi: ExtensionAPI) {
     install(ctx);
   });
 
-  pi.on("resources_discover", () => {
-    if (activeTui) scheduleThemeRemoval(activeTui);
+  pi.on("resources_discover", (_event, ctx) => {
+    if (activeTui) scheduleResourceCustomization(activeTui, ctx);
   });
 
   pi.on("session_shutdown", (_event, ctx) => {
     stopModelListener();
     stopGitListener();
-    for (const timer of themeRemovalTimers) clearTimeout(timer);
-    themeRemovalTimers = [];
+    for (const timer of resourceCustomizationTimers) clearTimeout(timer);
+    resourceCustomizationTimers = [];
     activeTui = undefined;
     requestRender = undefined;
     if (ctx.mode === "tui") {
