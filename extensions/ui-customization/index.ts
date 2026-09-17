@@ -67,6 +67,20 @@ const TITLE_LINES = [
 const ANSI_PATTERN =
   /[\u001B\u009B][[\]()#;?]*(?:(?:(?:[a-zA-Z\d]*(?:;[a-zA-Z\d]*)*)?\u0007)|(?:(?:\d{1,4}(?:;\d{0,4})*)?[\dA-PR-TZcf-nq-uy=><~]))/g;
 
+// Strip untrusted terminal sequences before adding dashboard styling.
+const OSC_PATTERN =
+  /(?:\x1b\]|\x9d)(?:[^\x07\x1b\x9c]|\x1b(?!\\))*(?:\x07|\x1b\\|\x9c)/g;
+const CSI_PATTERN = /(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]/g;
+const ESCAPE_PATTERN = /\x1b(?:[()][0-2A-Z]|[ -/]*[@-~])/g;
+
+function sanitizeTerminalLabel(text: string) {
+  return text
+    .replace(OSC_PATTERN, "")
+    .replace(CSI_PATTERN, "")
+    .replace(ESCAPE_PATTERN, "")
+    .replace(/[\x00-\x1f\x7f-\x9f]/g, "");
+}
+
 function mix(a: number, b: number, amount: number) {
   return Math.round(a + (b - a) * amount);
 }
@@ -254,11 +268,11 @@ function formatTokens(tokens: number) {
   return `${(tokens / 1_000_000).toFixed(1)}m`;
 }
 
-function formatDirectory(cwd: string) {
+export function formatDirectory(cwd: string) {
   const home = homedir();
   if (cwd === home) return "~";
-  if (cwd.startsWith(`${home}/`)) return `~/${relative(home, cwd)}`;
-  return cwd;
+  const display = cwd.startsWith(`${home}/`) ? `~/${relative(home, cwd)}` : cwd;
+  return sanitizeTerminalLabel(display);
 }
 
 function center(text: string, width: number) {

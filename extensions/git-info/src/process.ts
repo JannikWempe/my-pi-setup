@@ -2,6 +2,17 @@ import { Context, Effect, Layer, Stream } from "effect";
 import { ChildProcess } from "effect/unstable/process";
 import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner";
 
+const MAX_STREAM_CHARS = 10 * 1_024 * 1_024;
+const TRUNCATED_MARKER = "\n[command output truncated]\n";
+
+function appendBounded(current: string, chunk: string) {
+  // Length, not output content, records truncation: commands may print the marker.
+  if (current.length > MAX_STREAM_CHARS) return current;
+  if (current.length + chunk.length <= MAX_STREAM_CHARS) return current + chunk;
+  const remaining = Math.max(0, MAX_STREAM_CHARS - current.length);
+  return `${current}${chunk.slice(0, remaining)}${TRUNCATED_MARKER}`;
+}
+
 export interface CommandResult {
   code: number;
   stderr: string;
@@ -53,12 +64,12 @@ export const CommandRunnerLive = Layer.effect(
                 [
                   Stream.runForEach(Stream.decodeText(handle.stdout), (chunk) =>
                     Effect.sync(() => {
-                      stdout += chunk;
+                      stdout = appendBounded(stdout, chunk);
                     }),
                   ),
                   Stream.runForEach(Stream.decodeText(handle.stderr), (chunk) =>
                     Effect.sync(() => {
-                      stderr += chunk;
+                      stderr = appendBounded(stderr, chunk);
                     }),
                   ),
                   handle.exitCode,

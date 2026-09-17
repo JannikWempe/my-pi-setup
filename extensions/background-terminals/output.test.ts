@@ -65,6 +65,35 @@ test("spill receives the complete oversized chunk before trimming", () => {
   assert.equal(buf.view().text, "6789");
 });
 
+test("push reports spill backpressure while retaining the chunk", () => {
+  const buf = new OutputBuffer(1024, () => false);
+  assert.equal(buf.push("queued"), false);
+  assert.equal(buf.view().text, "queued");
+});
+
+test("push accepts absent/void spills and empty chunks without changing the view", () => {
+  for (const spill of [undefined, () => {}]) {
+    const buf = new OutputBuffer(4, spill);
+    assert.equal(buf.push("text"), true);
+    const before = buf.view();
+    const version = buf.version;
+    assert.equal(buf.push(""), true);
+    assert.deepEqual(buf.view(), before);
+    assert.equal(buf.version, version);
+  }
+});
+
+test("backpressure still updates byte counts, truncation, cache and version", () => {
+  const buf = new OutputBuffer(4, () => false);
+  buf.push("old");
+  assert.equal(buf.view().text, "old");
+  assert.equal(buf.push("ééé"), false);
+  assert.equal(buf.view().text, "éé");
+  assert.equal(buf.totalBytes, 9);
+  assert.equal(buf.truncatedBytes, 5);
+  assert.equal(buf.version, 2);
+});
+
 test("byte accounting uses UTF-8 byte length, not string length", () => {
   const buf = new OutputBuffer(1024);
   buf.push("héllo"); // é is 2 bytes

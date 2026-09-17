@@ -11,6 +11,23 @@ import { runCommand } from "./process.ts";
 
 const DIFF_SCROLL_STEP = 5;
 const MAX_DIFF_LINES = 20_000;
+// Strip terminal control sequences from repository-controlled paths and diff
+// text before applying trusted theme styling.
+// eslint-disable-next-line no-control-regex
+const OSC_PATTERN =
+  /(?:\x1b\]|\x9d)(?:[^\x07\x1b\x9c]|\x1b(?!\\))*(?:\x07|\x1b\\|\x9c)/g;
+// eslint-disable-next-line no-control-regex
+const CSI_PATTERN = /(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]/g;
+// eslint-disable-next-line no-control-regex
+const ESCAPE_PATTERN = /\x1b(?:[()][0-2A-Z]|[ -/]*[@-~])/g;
+
+export function sanitizeTerminalText(text: string) {
+  return text
+    .replace(OSC_PATTERN, "")
+    .replace(CSI_PATTERN, "")
+    .replace(ESCAPE_PATTERN, "")
+    .replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "");
+}
 
 interface ChangedPath {
   path: string;
@@ -56,7 +73,7 @@ function parseNumstat(output: string) {
 }
 
 function cleanDisplayPath(path: string) {
-  return path.replace(/[\r\n\t]/g, " ");
+  return sanitizeTerminalText(path).replace(/[\r\n\t]/g, " ");
 }
 
 const run = (cwd: string, args: string[]) =>
@@ -96,7 +113,10 @@ const loadFile = Effect.fn("git-info.loadFile")(function* (
     { concurrency: "unbounded" },
   );
   const stats = parseNumstat(statResult.stdout);
-  const allDiffLines = diffResult.stdout.trimEnd().split("\n");
+  const allDiffLines = diffResult.stdout
+    .trimEnd()
+    .split("\n")
+    .map(sanitizeTerminalText);
   const diff =
     allDiffLines.length > MAX_DIFF_LINES
       ? [

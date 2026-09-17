@@ -1,9 +1,27 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { homedir } from "node:os";
 import {
+  formatDirectory,
   categorizeSkillsSection,
   extractModelInvocableSkillNames,
 } from "./index.ts";
+
+test("directory labels strip terminal controls while preserving home abbreviation", () => {
+  assert.equal(formatDirectory(homedir()), "~");
+  assert.equal(formatDirectory(`${homedir()}/日本語`), "~/日本語");
+  for (const sequence of [
+    "\x1b]52;c;bad\x07",
+    "\x1b]0;title\x1b\\",
+    "\x9d0;title\x9c",
+    "\x1b[31m",
+    "\x9b2J",
+    "\x1b(B",
+    "\n\r\t\x01\x7f",
+  ]) {
+    assert.equal(formatDirectory(`/before${sequence}after`), "/beforeafter");
+  }
+});
 
 class FakeExpandableText {
   readonly children = undefined;

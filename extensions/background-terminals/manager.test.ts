@@ -11,11 +11,14 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
+import { Readable } from "node:stream";
 import { Effect } from "effect";
 import type { TerminalSnapshot } from "./src/domain.ts";
 import {
   MAX_RUNNING,
   MAX_TRACKED,
+  MAX_SPILL_BYTES_PER_STREAM,
+  RETAINED_PER_STREAM,
   TerminalManager,
   type TerminalManagerShape,
 } from "./src/manager.ts";
@@ -672,6 +675,92 @@ test("the spill file holds the complete capture when the settle hook fires, beyo
         totalBytes,
         "spill file was fully flushed before the settle hook",
       );
+    }
+  });
+});
+
+for (const stream of ["stdout", "stderr"] as const) {
+  for (const recovery of ["drain", "error"] as const) {
+    test(`${stream} resumes after spill backpressure and ${recovery}`, async (t) => {
+      const originalWrite = fs.WriteStream.prototype.write;
+      let blocked = false;
+      let pauses = 0;
+      let pausedBeforeRecovery = false;
+      const originalPause = Readable.prototype.pause;
+      t.mock.method(Readable.prototype, "pause", function (this: Readable) {
+        pauses++;
+        return originalPause.call(this);
+      });
+      t.mock.method(fs.WriteStream.prototype, "write", function (
+        this: fs.WriteStream,
+        ...args: Parameters<fs.WriteStream["write"]>
+      ) {
+        if (!blocked && String(this.path).endsWith(`.${stream}.log`)) {
+          blocked = true;
+          // Force one false return, then recover asynchronously while the
+          // source is paused. No production injection seam is needed.
+          const pausesBeforeWrite = pauses;
+          if (recovery === "drain") Reflect.apply(originalWrite, this, args);
+          setImmediate(() => {
+            pausedBeforeRecovery = pauses > pausesBeforeWrite;
+            if (recovery === "error") this.destroy(new Error("injected spill failure"));
+            else this.emit("drain");
+          });
+          return false;
+        }
+        return Reflect.apply(originalWrite, this, args);
+      });
+      await withManager(async (manager, runtime) => {
+        const total = 4 * 1024 * 1024;
+        const snap = await runTool(runtime, manager.start({
+          command: nodeCmd(`const s = process.${stream}; const chunk = "x".repeat(65536); let n = ${total / 65536}; function pump() { while (n > 0) { n--; if (!s.write(chunk)) { s.once("drain", pump); return; } } } pump();`),
+          title: `spill-${recovery}`,
+          cwd,
+        }));
+        assert.ok(await pollUntil(() => snap.status !== "running", 10_000), "source resumed and settled");
+        assert.equal(blocked, true);
+        assert.equal(pausedBeforeRecovery, true, "false write pauses the source");
+        assert.equal(snap.status, "done");
+        assert.equal(snap[stream].totalBytes, total);
+        if (recovery === "error") {
+          assert.equal(snap[stream].spillPath, undefined);
+          assert.match(snap.errorText ?? "", /injected spill failure/);
+        } else {
+          assert.ok(snap[stream].spillPath);
+          assert.equal(fs.statSync(snap[stream].spillPath!).size, total);
+          assert.equal(snap.errorText, undefined);
+        }
+      });
+    });
+  }
+}
+
+test("spill caps are independent per stream; capture and clean settlement continue", async () => {
+  assert.equal(MAX_SPILL_BYTES_PER_STREAM, 256 * 1024 * 1024);
+  await withManager(async (manager, runtime) => {
+    const total = MAX_SPILL_BYTES_PER_STREAM + 65536;
+    const snap = await runTool(runtime, manager.start({
+      // Respect child-side backpressure too: do not buffer 512 MiB in node.
+      command: nodeCmd(`const chunk = "é".repeat(32768); async function pump(s) { for (let n = 0; n < ${total / 65536}; n++) { if (!s.write(chunk)) await new Promise(r => s.once("drain", r)); } s.write("TAIL"); } Promise.all([pump(process.stdout), pump(process.stderr)]);`),
+      title: "spill-cap",
+      cwd,
+    }));
+    const paths = [snap.stdout.spillPath, snap.stderr.spillPath];
+    assert.ok(paths.every(Boolean), "both spills created");
+    assert.ok(await pollUntil(() => snap.status !== "running", 30_000), "firehose settled");
+    assert.equal(snap.status, "done");
+    assert.equal(snap.exitCode, 0);
+    assert.match(snap.errorText ?? "", /full-log spill reached the 268435456-byte safety limit/);
+    for (const [index, stream] of (["stdout", "stderr"] as const).entries()) {
+      const output = snap[stream];
+      assert.equal(output.spillPath, undefined, "partial spill is not advertised as full capture");
+      const size = fs.statSync(paths[index]!).size;
+      assert.ok(size <= MAX_SPILL_BYTES_PER_STREAM);
+      assert.ok(size > MAX_SPILL_BYTES_PER_STREAM - 65536, "spill retained data up to the boundary");
+      assert.equal(output.totalBytes, total + 4);
+      assert.ok(output.text.endsWith("TAIL"));
+      assert.ok(Buffer.byteLength(output.text) <= RETAINED_PER_STREAM);
+      assert.equal(output.truncatedBytes + Buffer.byteLength(output.text), total + 4);
     }
   });
 });
