@@ -35,7 +35,8 @@ export const BG_START_PROMPT_SNIPPET =
 export const BG_START_PROMPT_GUIDELINES = [
   "Use bg_start for commands expected to run long or indefinitely (servers, watch modes, long builds); use the regular bash tool for quick commands.",
   "bg_start processes receive no stdin — never start a command that requires interactive input.",
-  "After bg_start, keep working; the exit result arrives automatically. Use bg_status only when you need current output before continuing.",
+  "After bg_start, continue independent work; exit results are delivered automatically when the main session becomes idle and resume it. If blocked on completion with no independent work left, yield by ending your turn rather than issuing more tool calls.",
+  "Never use sleep or repeatedly poll bg_status/bg_list to wait for background terminal completion. Use bg_status only to inspect current output, check service readiness, or diagnose a problem; servers and watchers may never exit.",
 ];
 
 export const BG_START_PARAMETER_DESCRIPTIONS = {
@@ -46,7 +47,7 @@ export const BG_START_PARAMETER_DESCRIPTIONS = {
 };
 
 export const BG_STATUS_TOOL_DESCRIPTION =
-  "Peek at a background terminal's status and current output (tail-truncated) without blocking. If the terminal already exited, this returns its final state.";
+  "Peek at a background terminal's status and current output (tail-truncated) without blocking. If the terminal already exited, this returns its final state. Use for output inspection, service readiness, or diagnosis, not repeated completion polling; exit results arrive automatically when the main session becomes idle.";
 
 export const BG_STATUS_PARAMETER_DESCRIPTIONS = {
   id: 'Terminal id, e.g. "bt-1"',
@@ -65,8 +66,9 @@ export const BG_KILL_PARAMETER_DESCRIPTIONS = {
 export function buildStartResult(snap: TerminalSnapshot) {
   return (
     `Started background terminal ${snap.id} "${snap.title}" (pid ${snap.pid ?? "?"}, ${snap.cwd}).\n` +
-    `It runs in the background with no stdin. You'll get a message when it exits, ` +
-    `or use bg_status(id: "${snap.id}") to peek, bg_kill to stop it, bg_list to see all.`
+    `It runs in the background with no stdin. Its exit result will be delivered automatically when the main session becomes idle and resume it. ` +
+    `Continue independent work, or if blocked on completion, yield by ending your turn. Never sleep or repeatedly poll for completion. ` +
+    `Use bg_status(id: "${snap.id}") to inspect output or service readiness, bg_kill to stop it, or bg_list to see all.`
   );
 }
 

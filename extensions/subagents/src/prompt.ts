@@ -12,7 +12,8 @@ export const SUBAGENT_SPAWN_PROMPT_SNIPPET =
 export const SUBAGENT_SPAWN_PROMPT_GUIDELINES = [
   "Use subagent_spawn to delegate self-contained tasks that can run in the background; give it a complete, standalone prompt.",
   "Pick the subagent harness deliberately: pi unless you have a reason to prefer Claude Code or Codex (e.g. the user asked for one, or the task suits that harness).",
-  "After subagent_spawn, keep working; results arrive automatically. Only call subagent_wait when you cannot proceed without the result.",
+  "After subagent_spawn, continue independent work; completed results are delivered automatically when the main session becomes idle. When blocked on a result, call subagent_wait directly: it resumes on completion without polling.",
+  "Never use sleep or repeatedly poll subagent_check/subagent_list to wait for subagent completion. Use subagent_wait when blocked; reserve status checks for inspecting progress or diagnosing a problem.",
 ];
 
 /** Model-facing schema descriptions for subagent_spawn task and execution options. */
@@ -40,14 +41,15 @@ export function buildSubagentSpawnResult(options: {
 }) {
   return (
     `Spawned subagent ${options.id} "${options.title}" (${options.harness}: ${options.modelLabel}, ${options.cwd}).\n` +
-    `It runs in the background. Its result will be delivered to you when it finishes, ` +
-    `or use subagent_wait(ids: ["${options.id}"]) to block for it, subagent_cancel to stop it, subagent_check to peek, subagent_list to see all.`
+    `It runs in the background. Continue independent work; its completed result will be delivered automatically when the main session becomes idle. ` +
+    `If blocked, call subagent_wait(ids: ["${options.id}"]) directly; it resumes on completion. Never sleep or repeatedly poll for completion. ` +
+    `Use subagent_cancel to stop it, subagent_check to inspect progress, or subagent_list to see all.`
   );
 }
 
 /** Describes explicit blocking collection of one or more subagent results. */
 export const SUBAGENT_WAIT_TOOL_DESCRIPTION =
-  "Block until all listed subagents have settled, then return their final outputs. Prefer letting results arrive automatically; use this only when you need a result before continuing.";
+  "Block until all listed subagents have settled, then return their final outputs. Resumes on completion without polling or an arbitrary delay. Continue independent work when possible; when blocked on these results, call subagent_wait directly instead of sleeping or repeatedly checking status.";
 
 /** Model-facing schema description for the subagent ids to await. */
 export const SUBAGENT_WAIT_PARAMETER_DESCRIPTIONS = {
@@ -65,7 +67,7 @@ export const SUBAGENT_CANCEL_PARAMETER_DESCRIPTIONS = {
 
 /** Describes nonblocking inspection of a subagent without consuming its result. */
 export const SUBAGENT_CHECK_TOOL_DESCRIPTION =
-  "Peek at a subagent's status and recent activity without blocking. Does not consume its result.";
+  "Peek at a subagent's status and recent activity without blocking. Does not consume its result. Use for progress inspection or diagnosis, not repeated completion polling; use subagent_wait when blocked on a result.";
 
 /** Model-facing schema description for the subagent id to inspect. */
 export const SUBAGENT_CHECK_PARAMETER_DESCRIPTIONS = {
