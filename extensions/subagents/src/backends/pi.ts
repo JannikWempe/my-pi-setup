@@ -11,6 +11,7 @@
  *   the child session_shutdown hook and disposes the session.
  */
 
+import * as fs from "node:fs";
 import type { AssistantMessage, Message, Model } from "@earendil-works/pi-ai";
 import type {
   AgentSession,
@@ -28,6 +29,7 @@ import type { Cause, Scope } from "effect";
 import { Effect, Queue, Stream } from "effect";
 import type { SubagentBackend, SubagentSession } from "../backend.ts";
 import type {
+  ResumeTask,
   SpawnTask,
   SubagentEvent,
   SubagentMeta,
@@ -260,7 +262,7 @@ function boundedError(error: unknown) {
 }
 
 const makePiSession = (
-  task: SpawnTask,
+  task: SpawnTask | ResumeTask,
 ): Effect.Effect<SubagentSession, SpawnError, Scope.Scope> =>
   Effect.gen(function* () {
     const registry = task.parent.modelRegistry;
@@ -269,15 +271,41 @@ const makePiSession = (
         message: "pi backend requires the parent session's model registry.",
       });
     }
+    const resumeFile = "resumeFrom" in task
+      ? task.resumeFrom.sessionFilePath
+      : undefined;
+    if ("resumeFrom" in task && (!resumeFile || !fs.existsSync(resumeFile))) {
+      return yield* new SpawnError({
+        message: `Cannot resume: pi session file ${resumeFile ?? "(unknown)"} is missing (pi writes it only after the first response, so runs that failed earlier cannot be resumed).`,
+      });
+    }
 
+    const resumeSessionManager = yield* Effect.try({
+      try: () =>
+        resumeFile
+          ? SessionManager.open(resumeFile, undefined, task.cwd)
+          : undefined,
+      catch: (error) => new SpawnError({ message: boundedError(error) }),
+    });
+    // A resumed session keeps its last saved model unless the original spawn
+    // pinned one. Resolve it against the parent registry ourselves: the SDK's
+    // own restore only sees providers configured before child extensions
+    // bind, so extension-registered providers would silently fall back.
+    const savedModel = resumeSessionManager?.buildSessionContext().model;
     const model = yield* Effect.try({
       try: () =>
+        (!task.model && savedModel
+          ? registry.find(savedModel.provider, savedModel.modelId)
+          : undefined) ??
         resolvePiModel(registry, task.model, task.parent.inheritedModel),
       catch: (error) => new SpawnError({ message: boundedError(error) }),
     });
-    // pi's thinking levels ARE the shared reasoning-effort scale.
+    // pi's thinking levels ARE the shared reasoning-effort scale. A resumed
+    // session restores its own saved level unless the spawn pinned one.
     const thinkingLevel = (task.reasoningEffort ??
-      task.parent.inheritedThinkingLevel) as ThinkingLevel | undefined;
+      (resumeFile ? undefined : task.parent.inheritedThinkingLevel)) as
+      | ThinkingLevel
+      | undefined;
 
     const session = yield* Effect.tryPromise({
       try: async () => {
@@ -287,7 +315,8 @@ const makePiSession = (
         );
         const { session } = await createAgentSession({
           cwd: task.cwd,
-          sessionManager: SessionManager.create(task.cwd),
+          sessionManager:
+            resumeSessionManager ?? SessionManager.create(task.cwd),
           settingsManager,
           resourceLoader: loader,
           model,
@@ -512,15 +541,16 @@ const makePiSession = (
       });
     };
 
-    // Session naming is best-effort.
-    yield* Effect.try(() =>
-      session.sessionManager.appendSessionInfo(
-        `${task.origin === "btw" ? "btw" : "subagent"}: ${task.title}`,
-      ),
-    ).pipe(Effect.ignore);
-
     emit({ _tag: "MetaChanged", meta: currentMeta() });
-    startRun(task.prompt);
+    if ("prompt" in task) {
+      // Session naming is best-effort.
+      yield* Effect.try(() =>
+        session.sessionManager.appendSessionInfo(
+          `${task.origin === "btw" ? "btw" : "subagent"}: ${task.title}`,
+        ),
+      ).pipe(Effect.ignore);
+      startRun(task.prompt);
+    }
 
     return {
       meta: Effect.sync(currentMeta),
@@ -572,4 +602,5 @@ export const piBackend: SubagentBackend = {
   // In-process SDK: always available.
   available: Effect.succeed(true),
   spawn: makePiSession,
+  resume: makePiSession,
 };

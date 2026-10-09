@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Effect } from "effect";
 import { codexBackend } from "./src/backends/codex.ts";
-import type { ParentContext, SpawnTask } from "./src/domain.ts";
+import type {
+  ParentContext,
+  SpawnTask,
+  SubagentRecord,
+} from "./src/domain.ts";
 import { SubagentManager } from "./src/manager.ts";
 import { createSubagentRuntime, runTool } from "./src/runtime.ts";
 
@@ -97,6 +101,53 @@ test(
       assert.equal(manager.view.get(spawned.id)?.errorText, "Run was aborted");
     } finally {
       await runtime.dispose();
+    }
+  },
+);
+
+test(
+  "Codex backend resumes a persisted session after a parent restart",
+  { timeout: 150_000 },
+  async (t) => {
+    if (!(await codexAvailable())) {
+      t.skip("codex executable is unavailable");
+      return;
+    }
+
+    const records = new Map<string, SubagentRecord>();
+    let id = "";
+    const first = createSubagentRuntime();
+    try {
+      const manager = await first.runPromise(SubagentManager);
+      manager.view.setOnPersist((record) => records.set(record.id, record));
+      const spawned = await runTool(
+        first,
+        manager.spawn(
+          "codex",
+          task("Remember the codeword PERIWINKLE. Reply with exactly: noted"),
+        ),
+      );
+      id = spawned.id;
+      await deadline(runTool(first, manager.waitFor([id])), 60_000);
+      assert.equal(manager.view.get(id)?.status, "done");
+    } finally {
+      await first.dispose();
+    }
+
+    const second = createSubagentRuntime();
+    try {
+      const manager = await second.runPromise(SubagentManager);
+      await runTool(second, manager.restore([...records.values()], () => parent));
+      await runTool(
+        second,
+        manager.send(id, "What was the codeword? Reply with just the word."),
+      );
+      await deadline(runTool(second, manager.waitFor([id])), 60_000);
+      const resumed = manager.view.get(id);
+      assert.equal(resumed?.status, "done", resumed?.errorText ?? "");
+      assert.match(resumed?.finalText ?? "", /periwinkle/i);
+    } finally {
+      await second.dispose();
     }
   },
 );

@@ -22,6 +22,7 @@ import type { SubagentBackend, SubagentSession } from "../backend.ts";
 import type {
   BackendName,
   QueuedMessage,
+  ResumeTask,
   SpawnTask,
   SubagentEvent,
   SubagentMeta,
@@ -51,6 +52,7 @@ export function makeStubBackend(profile: StubProfile): SubagentBackend {
     // Real impls probe binary-on-PATH / SDK import / credentials here.
     available: Effect.succeed(true),
     spawn: (task) => makeStubSession(profile, task),
+    resume: (task) => makeStubSession(profile, task),
   };
 }
 
@@ -72,11 +74,15 @@ function chunked(text: string, size: number): string[] {
 
 const makeStubSession = (
   profile: StubProfile,
-  task: SpawnTask,
+  task: SpawnTask | ResumeTask,
 ): Effect.Effect<SubagentSession, never, Scope.Scope> =>
   Effect.gen(function* () {
-    const sessionId = `stub-${profile.backend}-${++sessionCounter}`;
-    const sessionFile = path.join(STUB_DIR, `${sessionId}.jsonl`);
+    // Resumed stubs keep appending to the recorded fake session file.
+    const resumed = "resumeFrom" in task ? task.resumeFrom : undefined;
+    const sessionId =
+      resumed?.nativeSessionId ?? `stub-${profile.backend}-${++sessionCounter}`;
+    const sessionFile =
+      resumed?.sessionFilePath ?? path.join(STUB_DIR, `${sessionId}.jsonl`);
 
     const state = {
       meta: {
@@ -254,13 +260,13 @@ const makeStubSession = (
         yield* Queue.offer(inbox, text);
       });
 
-    // Announce metadata, then kick off the initial run.
+    // Announce metadata, then kick off the initial run (resumes start idle).
     yield* Effect.try(() => fs.mkdirSync(STUB_DIR, { recursive: true })).pipe(
       Effect.ignore, // The fake session file directory is best-effort.
     );
     yield* emit({ _tag: "MetaChanged", meta: state.meta });
     // The session cannot be closed yet, so the initial submit cannot fail.
-    yield* submit(task.prompt).pipe(Effect.orDie);
+    if ("prompt" in task) yield* submit(task.prompt).pipe(Effect.orDie);
 
     return {
       meta: Effect.sync(() => state.meta),

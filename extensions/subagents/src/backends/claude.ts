@@ -26,6 +26,7 @@ import type { SubagentBackend, SubagentSession } from "../backend.ts";
 import type {
   QueuedMessage,
   ReasoningEffort,
+  ResumeTask,
   RunOutcome,
   SpawnTask,
   SubagentEvent,
@@ -285,9 +286,16 @@ interface NativeQueuedMessage extends QueuedMessage {
 }
 
 const makeClaudeSession = (
-  task: SpawnTask,
+  task: SpawnTask | ResumeTask,
 ): Effect.Effect<SubagentSession, SpawnError, Scope.Scope> =>
   Effect.gen(function* () {
+    const resumeSessionId =
+      "resumeFrom" in task ? task.resumeFrom.nativeSessionId : undefined;
+    if ("resumeFrom" in task && !resumeSessionId) {
+      return yield* new SpawnError({
+        message: "Cannot resume: no Claude Code session id was recorded.",
+      });
+    }
     const input = new ClaudeInput();
     const abortController = new AbortController();
     const events = yield* Queue.make<SubagentEvent, Cause.Done>();
@@ -314,6 +322,8 @@ const makeClaudeSession = (
         // Claude models used by this backend currently expose 200k context;
         // result.modelUsage replaces this fallback when the CLI knows better.
         contextWindow: CLAUDE_CONTEXT_WINDOW,
+        // A resumed session keeps its recorded model, window, and handles.
+        ...("resumeFrom" in task ? task.resumeFrom : {}),
       } satisfies SubagentMeta as SubagentMeta,
     };
 
@@ -342,6 +352,7 @@ const makeClaudeSession = (
               : { settingSources: ["user" as const] }),
             includePartialMessages: true,
             abortController,
+            ...(resumeSessionId ? { resume: resumeSessionId } : {}),
             ...(claudeBinary
               ? { pathToClaudeCodeExecutable: claudeBinary }
               : {}),
@@ -632,7 +643,7 @@ const makeClaudeSession = (
     };
 
     emit({ _tag: "MetaChanged", meta: state.meta });
-    submit(task.prompt);
+    if ("prompt" in task) submit(task.prompt);
 
     return {
       meta: Effect.sync(() => state.meta),
@@ -698,4 +709,5 @@ export const claudeBackend: SubagentBackend = {
   capabilities: { steering: true, modelSelection: true, reasoningEffort: true },
   available: Effect.sync(() => resolveClaudeBinary() !== undefined),
   spawn: makeClaudeSession,
+  resume: makeClaudeSession,
 };

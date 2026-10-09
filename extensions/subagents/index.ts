@@ -13,6 +13,11 @@
  * Unawaited subagents queue their result as a follow-up message when they
  * settle. `/subagents` opens a picker + full interactive takeover view.
  *
+ * The registry survives /reload and `pi --resume`: lifecycle changes are
+ * appended to the parent session as `subagent-record` custom entries, and
+ * session_start restores the latest record per id as a dormant subagent
+ * whose native session reopens on its next message.
+ *
  * Architecture: Effect v4 generators throughout (backends -> manager ->
  * runtime); this file is the async boundary where tool handlers run effects
  * against one shared ManagedRuntime. All three backends are real: pi runs
@@ -45,7 +50,9 @@ import {
   BACKEND_NAMES,
   formatElapsed,
   latestText,
+  type ParentContext,
   REASONING_EFFORTS,
+  type SubagentRecord,
   type SubagentSnapshot,
 } from "./src/domain.ts";
 import {
@@ -76,6 +83,7 @@ import {
 } from "./src/runtime.ts";
 import { openSubagentPicker, openSubagentTakeover } from "./src/ui/takeover.ts";
 
+const SUBAGENT_RECORD_ENTRY = "subagent-record";
 const SUBAGENT_OUTPUT_MAX_BYTES = 24 * 1024;
 const WAIT_OUTPUT_MAX_BYTES = 48 * 1024;
 const WAIT_PER_AGENT_MAX_BYTES = 16 * 1024;
@@ -137,6 +145,20 @@ function resolveChildProjectTrust(options: {
   }
 }
 
+/** Latest persisted record per subagent id, in session order. */
+function readSubagentRecords(ctx: ExtensionContext) {
+  const latest = new Map<string, SubagentRecord>();
+  for (const entry of ctx.sessionManager.getEntries()) {
+    if (entry.type !== "custom" || entry.customType !== SUBAGENT_RECORD_ENTRY)
+      continue;
+    const record = entry.data as SubagentRecord | undefined;
+    if (record?.version === 1 && typeof record.id === "string") {
+      latest.set(record.id, record);
+    }
+  }
+  return [...latest.values()];
+}
+
 export default function (pi: ExtensionAPI) {
   let runtime: SubagentRuntime | undefined;
   let managerPromise: Promise<SubagentManagerShape> | undefined;
@@ -153,6 +175,7 @@ export default function (pi: ExtensionAPI) {
       .runPromise(SubagentManager)
       .then((manager) => {
         manager.view.setOnSettled(onSettled);
+        manager.view.setOnPersist(onPersist);
         unsubStatus?.();
         unsubStatus = manager.view.subscribe(() => updateStatus(manager));
         updateStatus(manager);
@@ -240,9 +263,40 @@ export default function (pi: ExtensionAPI) {
     if (sessionContext?.isIdle()) flushResults();
   };
 
-  pi.on("session_start", (_event, ctx) => {
+  const parentContextFor = (
+    ctx: ExtensionContext,
+    childCwd: string,
+  ): ParentContext => ({
+    parentCwd: ctx.cwd,
+    projectTrusted: resolveChildProjectTrust({
+      parentCwd: ctx.cwd,
+      childCwd,
+      parentTrusted: ctx.isProjectTrusted(),
+    }),
+    inheritedModel: ctx.model
+      ? { provider: ctx.model.provider, id: ctx.model.id }
+      : undefined,
+    inheritedThinkingLevel: pi.getThinkingLevel(),
+    modelRegistry: ctx.modelRegistry,
+  });
+
+  const onPersist = (record: SubagentRecord) => {
+    // Never append into a session whose extension runtime is closing.
+    if (!sessionContext) return;
+    pi.appendEntry<SubagentRecord>(SUBAGENT_RECORD_ENTRY, record);
+  };
+
+  pi.on("session_start", async (_event, ctx) => {
     sessionContext = ctx;
     if (ctx.hasUI) ui = ctx.ui;
+    const records = readSubagentRecords(ctx);
+    if (records.length === 0) return;
+    const manager = await getManager();
+    await getRuntime().runPromise(
+      manager.restore(records, (cwd) =>
+        sessionContext ? parentContextFor(sessionContext, cwd) : undefined,
+      ),
+    );
   });
 
   pi.on("agent_settled", flushResults);
@@ -314,19 +368,7 @@ export default function (pi: ExtensionAPI) {
           cwd,
           model: params.model,
           reasoningEffort: params.reasoning_effort,
-          parent: {
-            parentCwd: ctx.cwd,
-            projectTrusted: resolveChildProjectTrust({
-              parentCwd: ctx.cwd,
-              childCwd: cwd,
-              parentTrusted: ctx.isProjectTrusted(),
-            }),
-            inheritedModel: ctx.model
-              ? { provider: ctx.model.provider, id: ctx.model.id }
-              : undefined,
-            inheritedThinkingLevel: pi.getThinkingLevel(),
-            modelRegistry: ctx.modelRegistry,
-          },
+          parent: parentContextFor(ctx, cwd),
         }),
         { signal, interruptMessage: "Subagent spawn aborted." },
       );
@@ -691,15 +733,7 @@ export default function (pi: ExtensionAPI) {
           prompt,
           title: deriveBtwTitle(prompt),
           cwd: ctx.cwd,
-          parent: {
-            parentCwd: ctx.cwd,
-            projectTrusted: ctx.isProjectTrusted(),
-            inheritedModel: ctx.model
-              ? { provider: ctx.model.provider, id: ctx.model.id }
-              : undefined,
-            inheritedThinkingLevel: pi.getThinkingLevel(),
-            modelRegistry: ctx.modelRegistry,
-          },
+          parent: parentContextFor(ctx, ctx.cwd),
         }),
       );
     } catch (error) {

@@ -12,6 +12,7 @@ import type { Effect, Scope, Stream } from "effect";
 import { Context } from "effect";
 import type {
   BackendName,
+  ResumeTask,
   SendError,
   SpawnError,
   SpawnTask,
@@ -63,6 +64,13 @@ export interface SubagentBackend {
    */
   spawn(
     task: SpawnTask,
+  ): Effect.Effect<SubagentSession, SpawnError, Scope.Scope>;
+  /**
+   * Reopen a persisted native session (pi session file, Claude session id,
+   * Codex thread id) without starting a run. Same scoping as `spawn`.
+   */
+  resume(
+    task: ResumeTask,
   ): Effect.Effect<SubagentSession, SpawnError, Scope.Scope>;
 }
 

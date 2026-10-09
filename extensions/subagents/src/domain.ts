@@ -46,10 +46,10 @@ export interface ParentContext {
   readonly modelRegistry?: ModelRegistry;
 }
 
-export interface SpawnTask {
+/** What every backend session needs, whether freshly spawned or resumed. */
+export interface SessionTask {
   /** Omitted for normal tool-driven spawns. */
   readonly origin?: SubagentOrigin;
-  readonly prompt: string;
   readonly title: string;
   readonly cwd: string;
   /**
@@ -61,6 +61,20 @@ export interface SpawnTask {
   /** Shared effort scale; each backend maps it to its native equivalent. */
   readonly reasoningEffort?: ReasoningEffort;
   readonly parent: ParentContext;
+}
+
+/** A fresh session that immediately starts a run with `prompt`. */
+export interface SpawnTask extends SessionTask {
+  readonly prompt: string;
+}
+
+/**
+ * Reopen a session persisted by an earlier parent process. The resumed
+ * session starts idle; its first `send()` starts a run.
+ */
+export interface ResumeTask extends SessionTask {
+  /** Native handles recorded while the original session ran. */
+  readonly resumeFrom: SubagentMeta;
 }
 
 export interface SubagentMeta {
@@ -228,6 +242,34 @@ export function formatElapsed(snap: SubagentSnapshot) {
   return minutes > 0
     ? `${minutes}m${seconds.toString().padStart(2, "0")}s`
     : `${seconds}s`;
+}
+
+// --- Persistence --------------------------------------------------------------
+
+/**
+ * The bounded, durable slice of a snapshot. The extension appends one to the
+ * parent session whenever a subagent's lifecycle or native handles change;
+ * the latest record per id is restored on the next session_start.
+ */
+export interface SubagentRecord {
+  readonly version: 1;
+  readonly id: string;
+  readonly origin: SubagentOrigin;
+  readonly backend: BackendName;
+  readonly title: string;
+  readonly prompt: string;
+  readonly cwd: string;
+  readonly status: SubagentStatus;
+  readonly createdAt: number;
+  readonly settledAt?: number;
+  readonly errorText?: string;
+  readonly meta: SubagentMeta;
+  readonly usage: { readonly tokens?: number; readonly contextWindow?: number };
+  readonly finalText: string;
+  readonly turns: number;
+  /** Original spawn hints, reapplied when the session is resumed. */
+  readonly model?: string;
+  readonly reasoningEffort?: ReasoningEffort;
 }
 
 // --- Errors -------------------------------------------------------------------

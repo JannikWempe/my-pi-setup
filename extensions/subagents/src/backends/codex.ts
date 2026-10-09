@@ -17,6 +17,7 @@ import { Effect, Queue, Stream } from "effect";
 import type { SubagentBackend, SubagentSession } from "../backend.ts";
 import type {
   ReasoningEffort,
+  ResumeTask,
   RunOutcome,
   SpawnTask,
   SubagentEvent,
@@ -302,9 +303,16 @@ function toolFailed(item: JsonRecord) {
 // --- The session -------------------------------------------------------------
 
 const makeCodexSession = (
-  task: SpawnTask,
+  task: SpawnTask | ResumeTask,
 ): Effect.Effect<SubagentSession, SpawnError, Scope.Scope> =>
   Effect.gen(function* () {
+    const resumeThreadId =
+      "resumeFrom" in task ? task.resumeFrom.nativeSessionId : undefined;
+    if ("resumeFrom" in task && !resumeThreadId) {
+      return yield* new SpawnError({
+        message: "Cannot resume: no Codex thread id was recorded.",
+      });
+    }
     const binary = resolveCodexBinary();
     if (!binary) {
       return yield* new SpawnError({
@@ -889,13 +897,20 @@ const makeCodexSession = (
         // Headless children cannot answer approval prompts. The caller
         // already chose to launch an autonomous subagent, so give the thread
         // full workspace access without interactive approval requests.
-        return request("thread/start", {
+        const threadSettings = {
           cwd: task.cwd,
           approvalPolicy: "never",
           sandbox: "danger-full-access",
-          ephemeral: false,
           ...(task.model ? { model: task.model } : {}),
-        });
+        };
+        return resumeThreadId
+          ? request("thread/resume", {
+              threadId: resumeThreadId,
+              ...threadSettings,
+              // History stays in the rollout; the manager keeps its own view.
+              excludeTurns: true,
+            })
+          : request("thread/start", { ...threadSettings, ephemeral: false });
       },
       catch: (error) => new SpawnError({ message: boundedError(error) }),
     });
@@ -904,13 +919,16 @@ const makeCodexSession = (
     const nativeSessionId = stringValue(thread?.id);
     if (!nativeSessionId) {
       return yield* new SpawnError({
-        message: "Codex thread/start returned no thread id.",
+        message: `Codex ${resumeThreadId ? "thread/resume" : "thread/start"} returned no thread id.`,
       });
     }
     state.meta = {
+      ...("resumeFrom" in task ? task.resumeFrom : {}),
       backend: "codex",
       modelLabel: stringValue(threadResult.model) ?? task.model,
-      sessionFilePath: stringValue(thread?.path),
+      sessionFilePath:
+        stringValue(thread?.path) ??
+        ("resumeFrom" in task ? task.resumeFrom.sessionFilePath : undefined),
       nativeSessionId,
     };
     if (task.reasoningEffort) {
@@ -927,7 +945,7 @@ const makeCodexSession = (
       );
     }
     emit({ _tag: "MetaChanged", meta: state.meta });
-    startRun(task.prompt);
+    if ("prompt" in task) startRun(task.prompt);
 
     return {
       meta: Effect.sync(() => state.meta),
@@ -1057,4 +1075,5 @@ export const codexBackend: SubagentBackend = {
   },
   available: Effect.sync(() => resolveCodexBinary() !== undefined),
   spawn: makeCodexSession,
+  resume: makeCodexSession,
 };

@@ -12,7 +12,12 @@ import { Effect, Layer, ManagedRuntime } from "effect";
 import { BackendRegistry, type SubagentBackend } from "./src/backend.ts";
 import { piBackend } from "./src/backends/pi.ts";
 import { makeStubBackend } from "./src/backends/stub.ts";
-import type { BackendName, ParentContext, SpawnTask } from "./src/domain.ts";
+import type {
+  BackendName,
+  ParentContext,
+  SpawnTask,
+  SubagentRecord,
+} from "./src/domain.ts";
 import {
   SubagentManager,
   SubagentManagerLive,
@@ -272,5 +277,139 @@ test("send steers an idle subagent into another turn", async () => {
     const afterSecond = manager.view.get(snap.id);
     assert.equal(afterSecond?.status, "done");
     assert.match(afterSecond?.finalText ?? "", /Second turn/);
+  });
+});
+
+/** Latest record per id, as the extension reads them back on session_start. */
+function latestRecords(records: SubagentRecord[]) {
+  return [...new Map(records.map((record) => [record.id, record])).values()];
+}
+
+test("persisted records restore finished and interrupted subagents", async () => {
+  const records: SubagentRecord[] = [];
+  let finishedId = "";
+  let runningId = "";
+  await withManager(async (manager, runtime) => {
+    manager.view.setOnPersist((record) => records.push(record));
+    const finished = await runTool(
+      runtime,
+      manager.spawn("claude", { ...task("Finish me"), model: "opus" }),
+    );
+    await runTool(runtime, manager.waitFor([finished.id]));
+    const running = await runTool(
+      runtime,
+      manager.spawn("codex", task("Still going at shutdown")),
+    );
+    finishedId = finished.id;
+    runningId = running.id;
+  });
+
+  const latest = latestRecords(records);
+  assert.equal(latest.find((r) => r.id === finishedId)?.status, "done");
+  assert.equal(latest.find((r) => r.id === finishedId)?.model, "opus");
+  // Teardown must not overwrite the last live state with its own settle.
+  assert.equal(latest.find((r) => r.id === runningId)?.status, "running");
+
+  await withManager(async (manager, runtime) => {
+    await runTool(runtime, manager.restore(latest, () => parent));
+    const finished = manager.view.get(finishedId);
+    assert.equal(finished?.status, "done");
+    assert.match(finished?.finalText ?? "", /completed: Finish me/);
+    assert.ok(finished?.meta.nativeSessionId);
+    const interrupted = manager.view.get(runningId);
+    assert.equal(interrupted?.status, "error");
+    assert.match(interrupted?.errorText ?? "", /parent session closed/);
+
+    // Waiting on a dormant subagent returns immediately.
+    await runTool(runtime, manager.waitFor([runningId]));
+
+    // New ids continue after the restored ones.
+    const next = await runTool(runtime, manager.spawn("codex", task("next")));
+    assert.notEqual(next.id, finishedId);
+    assert.notEqual(next.id, runningId);
+    assert.equal(Number(next.id.slice(3)), 3);
+  });
+});
+
+test("sending to a restored subagent resumes its native session", async () => {
+  const records: SubagentRecord[] = [];
+  let id = "";
+  let sessionFilePath: string | undefined;
+  await withManager(async (manager, runtime) => {
+    manager.view.setOnPersist((record) => records.push(record));
+    const snap = await runTool(
+      runtime,
+      manager.spawn("claude", task("First run")),
+    );
+    await runTool(runtime, manager.waitFor([snap.id]));
+    id = snap.id;
+    sessionFilePath = snap.meta.sessionFilePath;
+  });
+
+  await withManager(async (manager, runtime) => {
+    const persisted: SubagentRecord[] = [];
+    manager.view.setOnPersist((record) => persisted.push(record));
+    await runTool(
+      runtime,
+      manager.restore(latestRecords(records), () => parent),
+    );
+    // Restoring alone does not re-persist unchanged records.
+    assert.equal(persisted.length, 0);
+
+    await runTool(runtime, manager.send(id, "Second run"));
+    // No polling: waitFor treats the dispatched restart as running.
+    await runTool(runtime, manager.waitFor([id]));
+    const resumed = manager.view.get(id);
+    assert.equal(resumed?.status, "done");
+    assert.match(resumed?.finalText ?? "", /completed: Second run/);
+    assert.equal(resumed?.meta.sessionFilePath, sessionFilePath);
+    assert.equal(persisted.at(-1)?.status, "done");
+  });
+});
+
+test("a failed resume reports why and frees its running slot", async () => {
+  await withManager(async (manager, runtime) => {
+    await runTool(
+      runtime,
+      manager.restore(
+        [
+          {
+            version: 1,
+            id: "sa-7",
+            origin: "model",
+            backend: "codex",
+            title: "orphan",
+            prompt: "orphan",
+            cwd: process.cwd(),
+            status: "done",
+            createdAt: Date.now(),
+            meta: { backend: "codex" },
+            usage: {},
+            finalText: "old answer",
+            turns: 1,
+          },
+        ],
+        () => undefined,
+      ),
+    );
+    await assert.rejects(
+      runTool(runtime, manager.send("sa-7", "again")),
+      /no parent session context/,
+    );
+    const snap = manager.view.get("sa-7");
+    assert.equal(snap?.status, "done");
+    assert.match(snap?.errorText ?? "", /no parent session context/);
+    // The slot reserved for the restart was released.
+    const spawned = await runTool(
+      runtime,
+      Effect.forEach(
+        [task("a"), task("b"), task("c"), task("d")],
+        (spawnTask) => manager.spawn("codex", spawnTask),
+        { concurrency: "unbounded" },
+      ),
+    );
+    assert.equal(spawned.length, 4);
+    assert.equal(spawned[0]?.id.startsWith("sa-"), true);
+    assert.ok(spawned.every((snap) => Number(snap.id.slice(3)) > 7));
   });
 });

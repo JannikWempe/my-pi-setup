@@ -9,6 +9,11 @@
  * The manager also exposes a synchronous `SubagentReadModel` so the
  * imperative TUI components (which render synchronously) can read snapshots
  * and issue fire-and-forget commands without touching the Effect runtime.
+ *
+ * Persistence: lifecycle changes are reported as bounded `SubagentRecord`s
+ * through the persist hook. `restore()` turns records from an earlier parent
+ * process into dormant entries (no live session); the first `send()` to one
+ * reopens its native session through `SubagentBackend.resume`.
  */
 
 import {
@@ -26,11 +31,14 @@ import { BackendRegistry } from "./backend.ts";
 import type {
   BackendName,
   LiveToolState,
+  ParentContext,
+  ReasoningEffort,
   RunOutcome,
   SpawnTask,
   SubagentEvent,
   SubagentOrigin,
   SubagentMeta,
+  SubagentRecord,
   SubagentSnapshot,
   SubagentStatus,
   TranscriptItem,
@@ -50,6 +58,10 @@ const TRANSCRIPT_TEXT_MAX_LENGTH = 64 * 1_024;
 const LIVE_ASSISTANT_MAX_LENGTH = 128 * 1_024;
 const FINAL_TEXT_MAX_LENGTH = 1_024 * 1_024;
 const MAX_TRANSCRIPT_ITEMS = 512;
+const PERSISTED_PROMPT_MAX_LENGTH = 16 * 1_024;
+const PERSISTED_FINAL_TEXT_MAX_LENGTH = 64 * 1_024;
+const INTERRUPTED_BY_SHUTDOWN =
+  "Interrupted when the parent session closed. Send it a message from /subagents to resume.";
 
 function bounded(text: string) {
   return text.slice(0, ERROR_TEXT_MAX_LENGTH);
@@ -95,9 +107,14 @@ interface MutableSnapshot {
 
 interface Entry {
   snapshot: MutableSnapshot;
-  session: SubagentSession;
-  scope: Scope.Closeable;
+  /** Absent while dormant (restored, not yet resumed). */
+  session?: SubagentSession;
+  scope?: Scope.Closeable;
   pump?: Fiber.Fiber<void>;
+  /** Original spawn hints, persisted so a resume reapplies them. */
+  hints: { model?: string; reasoningEffort?: ReasoningEffort };
+  /** Last persisted record (serialized), to skip identical writes. */
+  persisted?: string;
   liveToolMap: Map<string, LiveToolState>;
   /** Idle restart dispatched but RunStarted not folded yet; counts as running
    * so concurrent restarts cannot race past the cap. */
@@ -127,6 +144,8 @@ export interface SubagentReadModel {
   setOnSettled(
     hook: ((snap: SubagentSnapshot, consumed: boolean) => void) | undefined,
   ): void;
+  /** Register the persistence hook; called on lifecycle/handle changes. */
+  setOnPersist(hook: ((record: SubagentRecord) => void) | undefined): void;
 }
 
 // --- Service --------------------------------------------------------------------
@@ -162,6 +181,15 @@ export interface SubagentManagerShape {
   ): Effect.Effect<ReadonlyArray<CancelResult>>;
   send(id: string, text: string): Effect.Effect<void, SendError>;
   get(id: string): Effect.Effect<SubagentSnapshot | undefined>;
+  /**
+   * Re-register subagents persisted by an earlier parent process as dormant
+   * entries. Runs that were still active come back as interrupted errors.
+   * `parentFor` supplies the live parent context when one is resumed.
+   */
+  restore(
+    records: ReadonlyArray<SubagentRecord>,
+    parentFor: (cwd: string) => ParentContext | undefined,
+  ): Effect.Effect<void>;
   readonly list: Effect.Effect<ReadonlyArray<SubagentSnapshot>>;
   readonly disposeAll: Effect.Effect<void>;
   readonly view: SubagentReadModel;
@@ -194,6 +222,8 @@ const makeManager = Effect.gen(function* () {
   let disposed = false;
   let onSettled:
     ((snap: SubagentSnapshot, consumed: boolean) => void) | undefined;
+  let onPersist: ((record: SubagentRecord) => void) | undefined;
+  let resumeParentFor: ((cwd: string) => ParentContext | undefined) | undefined;
 
   const notify = (id?: string) => {
     const waiters = changeWaiters;
@@ -244,7 +274,46 @@ const makeManager = Effect.gen(function* () {
   };
 
   const closeEntryScope = (entry: Entry) =>
-    Scope.close(entry.scope, Exit.void).pipe(Effect.ignore);
+    entry.scope
+      ? Scope.close(entry.scope, Exit.void).pipe(Effect.ignore)
+      : Effect.void;
+
+  const toRecord = (entry: Entry): SubagentRecord => {
+    const s = entry.snapshot;
+    return {
+      version: 1,
+      id: s.id,
+      origin: s.origin,
+      backend: s.backend,
+      title: s.title,
+      prompt: s.prompt.slice(0, PERSISTED_PROMPT_MAX_LENGTH),
+      cwd: s.cwd,
+      status: s.status,
+      createdAt: s.createdAt,
+      settledAt: s.settledAt,
+      errorText: s.errorText,
+      meta: s.meta,
+      usage: s.usage,
+      finalText: s.finalText.slice(0, PERSISTED_FINAL_TEXT_MAX_LENGTH),
+      turns: s.turns,
+      model: entry.hints.model,
+      reasoningEffort: entry.hints.reasoningEffort,
+    };
+  };
+
+  /** Report the entry's durable state, skipping writes that change nothing. */
+  const persist = (entry: Entry) => {
+    if (disposed || !onPersist) return;
+    const record = toRecord(entry);
+    const serialized = JSON.stringify(record);
+    if (serialized === entry.persisted) return;
+    entry.persisted = serialized;
+    try {
+      onPersist(record);
+    } catch {
+      // Persistence is best-effort; lifecycle state stays authoritative.
+    }
+  };
 
   const pruneSettled = () => {
     if (entries.size <= MAX_TRACKED) return;
@@ -301,6 +370,7 @@ const makeManager = Effect.gen(function* () {
     s.liveTools = [];
     s.queued = [];
     const consumed = (waitInterest.get(s.id) ?? 0) > 0;
+    persist(entry);
     notify(s.id);
     try {
       // During teardown, don't queue results into a shutting-down session.
@@ -319,6 +389,7 @@ const makeManager = Effect.gen(function* () {
         s.status = "running";
         s.settledAt = undefined;
         s.errorText = undefined;
+        persist(entry);
         break;
       case "RunSettled":
         settle(entry, event.outcome);
@@ -409,15 +480,97 @@ const makeManager = Effect.gen(function* () {
           contextWindow: event.contextWindow ?? s.usage.contextWindow,
         };
         break;
-      case "MetaChanged":
+      case "MetaChanged": {
+        const before = s.meta;
         s.meta = { ...s.meta, ...event.meta };
+        // Native handles are what a later resume needs; record them early.
+        if (
+          s.meta.sessionFilePath !== before.sessionFilePath ||
+          s.meta.nativeSessionId !== before.nativeSessionId
+        ) {
+          persist(entry);
+        }
         break;
+      }
       case "BackendError":
         s.errorText = bounded(event.message);
         break;
     }
     notify(s.id);
   };
+
+  /**
+   * Fold the session's event stream into the snapshot. Tied to the entry
+   * scope, so closing the scope stops it. If the stream ends while the
+   * subagent still looks running, the backend died out from under us.
+   */
+  const attachPump = (
+    entry: Entry,
+    session: SubagentSession,
+    scope: Scope.Closeable,
+  ) =>
+    Effect.gen(function* () {
+      const pump = Stream.runForEach(session.events, (event) =>
+        Effect.sync(() => foldEvent(entry, event)),
+      ).pipe(
+        Effect.ensuring(
+          Effect.sync(() => {
+            if (entry.snapshot.status === "running") {
+              settle(entry, {
+                _tag: "Failed",
+                errorText: "Backend event stream ended unexpectedly",
+              });
+            }
+          }),
+        ),
+      );
+      entry.pump = yield* Scope.provide(Effect.forkScoped(pump), scope);
+    });
+
+  /** Reopen a dormant entry's native session and start pumping its events. */
+  const resumeEntry = (entry: Entry) =>
+    Effect.gen(function* () {
+      const s = entry.snapshot;
+      const backend = registry.get(s.backend);
+      if (!backend || !(yield* backend.available)) {
+        return yield* new SendError({
+          message: `Cannot resume "${s.id}": backend "${s.backend}" is not available.`,
+        });
+      }
+      const parent = resumeParentFor?.(s.cwd);
+      if (!parent) {
+        return yield* new SendError({
+          message: `Cannot resume "${s.id}": no parent session context.`,
+        });
+      }
+      const scope = yield* Scope.make();
+      const session = yield* Scope.provide(
+        backend.resume({
+          origin: s.origin,
+          title: s.title,
+          cwd: s.cwd,
+          model: entry.hints.model,
+          reasoningEffort: entry.hints.reasoningEffort,
+          parent,
+          resumeFrom: s.meta,
+        }),
+        scope,
+      ).pipe(
+        Effect.onError(() => Scope.close(scope, Exit.void)),
+        Effect.mapError((error) => new SendError({ message: error.message })),
+      );
+      if (disposed || entries.get(s.id) !== entry) {
+        yield* Scope.close(scope, Exit.void);
+        return yield* new SendError({
+          message: `Subagent "${s.id}" is no longer tracked.`,
+        });
+      }
+      entry.session = session;
+      entry.scope = scope;
+      s.meta = { ...s.meta, ...(yield* session.meta) };
+      yield* attachPump(entry, session, scope);
+      return session;
+    });
 
   const spawn = (backendName: BackendName, task: SpawnTask) =>
     Effect.gen(function* () {
@@ -490,28 +643,12 @@ const makeManager = Effect.gen(function* () {
           session,
           scope,
           liveToolMap: new Map(),
+          hints: { model: task.model, reasoningEffort: task.reasoningEffort },
         };
         entries.set(id, entry);
+        yield* attachPump(entry, session, scope);
 
-        // Pump: fold the event stream into the snapshot. Tied to the entry
-        // scope, so closing the scope stops it. If the stream ends while the
-        // subagent still looks running, the backend died out from under us.
-        const pump = Stream.runForEach(session.events, (event) =>
-          Effect.sync(() => foldEvent(entry, event)),
-        ).pipe(
-          Effect.ensuring(
-            Effect.sync(() => {
-              if (entry.snapshot.status === "running") {
-                settle(entry, {
-                  _tag: "Failed",
-                  errorText: "Backend event stream ended unexpectedly",
-                });
-              }
-            }),
-          ),
-        );
-        entry.pump = yield* Scope.provide(Effect.forkScoped(pump), scope);
-
+        persist(entry);
         notify(id);
         return entry.snapshot as SubagentSnapshot;
       });
@@ -535,9 +672,14 @@ const makeManager = Effect.gen(function* () {
       addInterest(unique);
       const loop = Effect.gen(function* () {
         while (true) {
-          const pending = unique.filter(
-            (id) => entries.get(id)?.snapshot.status === "running",
-          );
+          // A dispatched restart counts as running: its RunStarted reaches
+          // the snapshot only via the async pump, after send() returns.
+          const pending = unique.filter((id) => {
+            const entry = entries.get(id);
+            return (
+              entry?.snapshot.status === "running" || entry?.restarting === true
+            );
+          });
           if (pending.length === 0) return;
           onPending?.(pending);
           yield* nextChange;
@@ -556,8 +698,9 @@ const makeManager = Effect.gen(function* () {
   /** Interrupt one running entry, force-closing its scope after 5s. */
   const abortEntry = (entry: Entry) =>
     Effect.gen(function* () {
-      if (entry.snapshot.status !== "running") return;
-      const graceful = yield* entry.session.interrupt.pipe(
+      const session = entry.session;
+      if (!session || entry.snapshot.status !== "running") return;
+      const graceful = yield* session.interrupt.pipe(
         Effect.timeout(STOP_TIMEOUT_MS),
         Effect.result,
       );
@@ -633,6 +776,11 @@ const makeManager = Effect.gen(function* () {
       // must respect the same cap as spawn. Steering an already-running one
       // does not consume additional capacity.
       if (entry.snapshot.status !== "running") {
+        if (entry.restarting) {
+          return new SendError({
+            message: `Subagent "${id}" is already restarting; wait for it to start before sending more.`,
+          });
+        }
         if (runningCount() + reserved >= MAX_RUNNING) {
           return new SendError({
             message: `Max ${MAX_RUNNING} subagents can run concurrently; restarting "${id}" would exceed that.`,
@@ -643,15 +791,95 @@ const makeManager = Effect.gen(function* () {
         // both pass the check in that window. Cleared by RunStarted/settle,
         // or here when the backend rejects the send.
         entry.restarting = true;
-        return entry.session.send(text).pipe(
+        const session = entry.session
+          ? Effect.succeed(entry.session)
+          : resumeEntry(entry);
+        return session.pipe(
+          Effect.flatMap((live) => live.send(text)),
+          Effect.tapError((error) =>
+            Effect.sync(() => {
+              // Surface the failure: UI sends are fire-and-forget.
+              entry.snapshot.errorText = bounded(error.message);
+            }),
+          ),
           Effect.onError(() =>
             Effect.sync(() => {
               entry.restarting = false;
+              notify(id);
             }),
           ),
         );
       }
-      return entry.session.send(text);
+      // Running implies a live session: dormant entries are never running.
+      return entry.session!.send(text);
+    });
+
+  const restore = (
+    records: ReadonlyArray<SubagentRecord>,
+    parentFor: (cwd: string) => ParentContext | undefined,
+  ) =>
+    Effect.sync(() => {
+      if (disposed) return;
+      resumeParentFor = parentFor;
+      const latest = [...records]
+        .filter((record) => record.version === 1 && !entries.has(record.id))
+        .sort(
+          (a, b) =>
+            (a.settledAt ?? a.createdAt) - (b.settledAt ?? b.createdAt),
+        )
+        .slice(-MAX_TRACKED);
+      for (const record of latest) {
+        const interrupted = record.status === "running";
+        const transcript: TranscriptItem[] = [
+          { kind: "user", text: boundedTranscriptText(record.prompt) },
+        ];
+        if (record.finalText) {
+          transcript.push({
+            kind: "assistant",
+            parts: [
+              { type: "text", text: boundedTranscriptText(record.finalText) },
+            ],
+          });
+        }
+        const entry: Entry = {
+          snapshot: {
+            id: record.id,
+            origin: record.origin,
+            backend: record.backend,
+            title: record.title,
+            prompt: record.prompt,
+            cwd: record.cwd,
+            status: interrupted ? "error" : record.status,
+            createdAt: record.createdAt,
+            // An interrupted run's real end is unknown; freeze its clock.
+            settledAt: record.settledAt ?? Date.now(),
+            errorText: interrupted
+              ? INTERRUPTED_BY_SHUTDOWN
+              : record.errorText,
+            meta: record.meta,
+            usage: { ...record.usage },
+            transcript,
+            liveTools: [],
+            queued: [],
+            finalText: record.finalText,
+            turns: record.turns,
+          },
+          liveToolMap: new Map(),
+          hints: {
+            model: record.model,
+            reasoningEffort: record.reasoningEffort,
+          },
+        };
+        entry.persisted = JSON.stringify(toRecord(entry));
+        entries.set(record.id, entry);
+        const serial = /^(sa|btw)-(\d+)$/.exec(record.id);
+        if (serial?.[1] === "sa") {
+          modelCounter = Math.max(modelCounter, Number(serial[2]));
+        } else if (serial?.[1] === "btw") {
+          btwCounter = Math.max(btwCounter, Number(serial[2]));
+        }
+      }
+      notify();
     });
 
   const disposeAll = Effect.gen(function* () {
@@ -711,6 +939,9 @@ const makeManager = Effect.gen(function* () {
     setOnSettled: (hook) => {
       onSettled = hook;
     },
+    setOnPersist: (hook) => {
+      onPersist = hook;
+    },
   };
 
   // Safety net: disposing the ManagedRuntime tears everything down even if
@@ -723,6 +954,7 @@ const makeManager = Effect.gen(function* () {
     cancel,
     send,
     get: (id) => Effect.sync(() => entries.get(id)?.snapshot),
+    restore,
     list: Effect.sync(() => [...entries.values()].map((e) => e.snapshot)),
     disposeAll,
     view,
