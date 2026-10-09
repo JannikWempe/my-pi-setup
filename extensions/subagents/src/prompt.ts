@@ -14,6 +14,7 @@ export const SUBAGENT_SPAWN_PROMPT_GUIDELINES = [
   "Pick the subagent harness deliberately: pi unless you have a reason to prefer Claude Code or Codex (e.g. the user asked for one, or the task suits that harness).",
   "After subagent_spawn, continue independent work; completed results are delivered automatically when the main session becomes idle. When blocked on a result, call subagent_wait directly: it resumes on completion without polling.",
   "Never use sleep or repeatedly poll subagent_check/subagent_list to wait for subagent completion. Use subagent_wait when blocked; reserve status checks for inspecting progress or diagnosing a problem.",
+  "To follow up with an existing subagent (corrections, follow-up questions, continuing its task), use subagent_send: it keeps the subagent's full context, unlike spawning a new one.",
 ];
 
 /** Model-facing schema descriptions for subagent_spawn task and execution options. */
@@ -72,6 +73,17 @@ export const SUBAGENT_CHECK_TOOL_DESCRIPTION =
 /** Model-facing schema description for the subagent id to inspect. */
 export const SUBAGENT_CHECK_PARAMETER_DESCRIPTIONS = {
   id: "Subagent id",
+};
+
+/** Describes messaging an existing subagent: steer a running one or start another turn. */
+export const SUBAGENT_SEND_TOOL_DESCRIPTION =
+  "Send a message to an existing subagent, which keeps its full context. A running subagent receives it as steering for its current run; a finished, failed, cancelled, or restored one starts a new turn, and its result is delivered like a spawn's (automatically when idle, or via subagent_wait). Returns immediately.";
+
+/** Model-facing schema descriptions for subagent_send. */
+export const SUBAGENT_SEND_PARAMETER_DESCRIPTIONS = {
+  id: "Subagent id",
+  message:
+    "Message for the subagent. It already has its earlier context, so only say what is new.",
 };
 
 /** Describes listing all tracked running and settled subagents. */

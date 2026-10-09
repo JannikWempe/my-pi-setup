@@ -68,6 +68,8 @@ import {
   SUBAGENT_CHECK_PARAMETER_DESCRIPTIONS,
   SUBAGENT_CHECK_TOOL_DESCRIPTION,
   SUBAGENT_LIST_TOOL_DESCRIPTION,
+  SUBAGENT_SEND_PARAMETER_DESCRIPTIONS,
+  SUBAGENT_SEND_TOOL_DESCRIPTION,
   SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS,
   SUBAGENT_SPAWN_PROMPT_GUIDELINES,
   SUBAGENT_SPAWN_PROMPT_SNIPPET,
@@ -540,6 +542,50 @@ export default function (pi: ExtensionAPI) {
             status: entry.status,
           })),
         },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "subagent_send",
+    label: "Message Subagent",
+    description: SUBAGENT_SEND_TOOL_DESCRIPTION,
+    parameters: Type.Object({
+      id: Type.String({
+        description: SUBAGENT_SEND_PARAMETER_DESCRIPTIONS.id,
+      }),
+      message: Type.String({
+        description: SUBAGENT_SEND_PARAMETER_DESCRIPTIONS.message,
+      }),
+    }),
+    async execute(_toolCallId, params, signal) {
+      const manager = await getManager();
+      const snap = manager.view.get(params.id);
+      if (!snap || !isModelVisible(snap)) {
+        const known = manager.view
+          .list()
+          .filter(isModelVisible)
+          .map((s) => s.id);
+        throw new Error(
+          `Unknown subagent id "${params.id}". Known: ${known.join(", ") || "none"}.`,
+        );
+      }
+      if (!params.message.trim()) throw new Error("Message is empty.");
+
+      const steered = snap.status === "running";
+      // A restored subagent reopens its native session here, which can take
+      // a moment; the manager surfaces resume failures as a SendError.
+      await runTool(getRuntime(), manager.send(snap.id, params.message), {
+        signal,
+        interruptMessage: "Send aborted.",
+      });
+
+      const text = steered
+        ? `Sent to running subagent ${snap.id} "${snap.title}"; it applies to the current run.`
+        : `Started a new turn on ${snap.id} "${snap.title}". Its result is delivered automatically when the main session becomes idle, or collect it with subagent_wait.`;
+      return {
+        content: [{ type: "text", text }],
+        details: { id: snap.id, steered },
       };
     },
   });

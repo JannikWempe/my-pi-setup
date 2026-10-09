@@ -64,6 +64,7 @@ Call `subagent_spawn` with a complete `prompt`, short `name`, chosen `harness`, 
 - `subagent_list()`: list all runs.
 - `subagent_wait({ ids })`: block only when results are required to proceed.
 - `subagent_cancel({ ids })`: stop runs while preserving partial transcripts.
+- `subagent_send({ id, message })`: follow up with an existing subagent, keeping its context. Steers a running one; starts a new turn on a finished or restored one.
 - `/subagents`: inspect or take over a run interactively.
 
 Results return automatically. After spawning, continue useful parent work instead of immediately waiting.
