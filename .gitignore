@@ -15,6 +15,9 @@ models-store.json
 *cache.json
 mcp-oauth/
 mcp-onboarding.json
+mcp-auth.json
+mcp-project-approvals.json
+claude-bridge.json
 
 # managed by herdr
 /extensions/herdr-agent-state.ts
