@@ -36,6 +36,7 @@ import type {
   TranscriptPart,
 } from "../domain.ts";
 import { SendError, SpawnError } from "../domain.ts";
+import { childInstructionsFor } from "../prompt.ts";
 import { createToolCallTimeoutGuard } from "../../../shared/tool-call-timeout.ts";
 
 const CHILD_SHUTDOWN_TIMEOUT_MS = 5_000;
@@ -98,12 +99,23 @@ function resolvePiModel(
 // --- Child session helpers (ported from v1 shared/child-session.ts) -----------
 
 /** Load normal global/package resources and trust-gated project resources. */
-async function createChildResources(cwd: string, projectTrusted: boolean) {
+async function createChildResources(
+  cwd: string,
+  projectTrusted: boolean,
+  instructions: string | undefined,
+) {
   const agentDir = getAgentDir();
   const settingsManager = SettingsManager.create(cwd, agentDir, {
     projectTrusted,
   });
-  const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
+  const loader = new DefaultResourceLoader({
+    cwd,
+    agentDir,
+    settingsManager,
+    ...(instructions
+      ? { appendSystemPromptOverride: (base) => [...base, instructions] }
+      : {}),
+  });
   await loader.reload();
   return { loader, settingsManager };
 }
@@ -272,9 +284,8 @@ const makePiSession = (
         message: "pi backend requires the parent session's model registry.",
       });
     }
-    const resumeFile = "resumeFrom" in task
-      ? task.resumeFrom.sessionFilePath
-      : undefined;
+    const resumeFile =
+      "resumeFrom" in task ? task.resumeFrom.sessionFilePath : undefined;
     if ("resumeFrom" in task && (!resumeFile || !fs.existsSync(resumeFile))) {
       return yield* new SpawnError({
         message: `Cannot resume: pi session file ${resumeFile ?? "(unknown)"} is missing (pi writes it only after the first response, so runs that failed earlier cannot be resumed).`,
@@ -305,14 +316,14 @@ const makePiSession = (
     // session restores its own saved level unless the spawn pinned one.
     const thinkingLevel = (task.reasoningEffort ??
       (resumeFile ? undefined : task.parent.inheritedThinkingLevel)) as
-      | ThinkingLevel
-      | undefined;
+      ThinkingLevel | undefined;
 
     const session = yield* Effect.tryPromise({
       try: async () => {
         const { loader, settingsManager } = await createChildResources(
           task.cwd,
           task.parent.projectTrusted,
+          childInstructionsFor(task.origin),
         );
         const { session } = await createAgentSession({
           cwd: task.cwd,

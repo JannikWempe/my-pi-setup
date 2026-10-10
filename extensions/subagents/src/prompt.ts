@@ -1,5 +1,7 @@
 /** All model-facing strings for the subagents tools. */
 
+import type { SubagentOrigin } from "./domain.ts";
+
 /** Describes subagent_spawn, including harnesses and the fixed concurrency cap. */
 export const SUBAGENT_SPAWN_TOOL_DESCRIPTION =
   "Spawn a background subagent: a fully autonomous, headless agent with its own context window and the selected harness's normal host permissions. You choose the harness it runs on: pi (in-process pi session, inherits this environment's tools and config), claude (Claude Code), or codex (Codex CLI). Fire-and-forget: this returns immediately with an id. The subagent's final output is queued back to you as a message when it settles, or collect it explicitly with subagent_wait. Children cannot orchestrate more agents/workflows or ask the user, and cannot see this conversation, so the prompt must be self-contained. Only use trusted working directories. Max 4 subagents can be running at once across all harnesses.";
@@ -55,6 +57,8 @@ export const SUBAGENT_WAIT_TOOL_DESCRIPTION =
 /** Model-facing schema description for the subagent ids to await. */
 export const SUBAGENT_WAIT_PARAMETER_DESCRIPTIONS = {
   ids: 'Subagent ids to wait for, e.g. ["sa-1", "sa-2"]',
+  timeoutSeconds:
+    "Optional limit in seconds. On timeout, returns the finished results and lists the subagents still running; nothing is cancelled. Omit to wait until all settle.",
 };
 
 /** Describes aborting running subagents while retaining their partial transcripts. */
@@ -74,6 +78,23 @@ export const SUBAGENT_CHECK_TOOL_DESCRIPTION =
 export const SUBAGENT_CHECK_PARAMETER_DESCRIPTIONS = {
   id: "Subagent id",
 };
+
+/**
+ * Standing instructions for delegated children, added to each harness's
+ * system/developer prompt. They keep reports compact (the parent pays for
+ * every byte in its context) and stop children waiting on a human.
+ */
+const SUBAGENT_CHILD_INSTRUCTIONS = `You are running as a delegated subagent. Another agent assigned you this task and sees only your final message; no human is watching or available to answer questions.
+
+- Work autonomously. If something is ambiguous, make a reasonable assumption, continue, and state the assumption in your report.
+- Stay within the assigned task.
+- End with a concise, self-contained report: the outcome or answer, files you changed (paths), and anything unresolved or needing a decision. If you could not finish, say so plainly and why. Do not narrate the steps you took; include details (exact values, paths, snippets) only where the caller needs them.
+- The caller may send follow-up messages; answer them the same way.`;
+
+/** Child instructions for a task, or none for user-facing /btw sessions. */
+export function childInstructionsFor(origin: SubagentOrigin | undefined) {
+  return origin === "btw" ? undefined : SUBAGENT_CHILD_INSTRUCTIONS;
+}
 
 /** Describes messaging an existing subagent: steer a running one or start another turn. */
 export const SUBAGENT_SEND_TOOL_DESCRIPTION =

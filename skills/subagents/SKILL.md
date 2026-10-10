@@ -62,7 +62,7 @@ Call `subagent_spawn` with a complete `prompt`, short `name`, chosen `harness`, 
 
 - `subagent_check({ id })`: peek without blocking.
 - `subagent_list()`: list all runs.
-- `subagent_wait({ ids })`: block only when results are required to proceed.
+- `subagent_wait({ ids, timeout_seconds? })`: block only when results are required to proceed. With a timeout it returns finished results and lists the rest as still running; nothing is cancelled.
 - `subagent_cancel({ ids })`: stop runs while preserving partial transcripts.
 - `subagent_send({ id, message })`: follow up with an existing subagent, keeping its context. Steers a running one; starts a new turn on a finished or restored one.
 - `/subagents`: inspect or take over a run interactively.

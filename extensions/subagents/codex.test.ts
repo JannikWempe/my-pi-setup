@@ -2,11 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Effect } from "effect";
 import { codexBackend } from "./src/backends/codex.ts";
-import type {
-  ParentContext,
-  SpawnTask,
-  SubagentRecord,
-} from "./src/domain.ts";
+import type { ParentContext, SpawnTask, SubagentRecord } from "./src/domain.ts";
 import { SubagentManager } from "./src/manager.ts";
 import { createSubagentRuntime, runTool } from "./src/runtime.ts";
 
@@ -137,7 +133,10 @@ test(
     const second = createSubagentRuntime();
     try {
       const manager = await second.runPromise(SubagentManager);
-      await runTool(second, manager.restore([...records.values()], () => parent));
+      await runTool(
+        second,
+        manager.restore([...records.values()], () => parent),
+      );
       await runTool(
         second,
         manager.send(id, "What was the codeword? Reply with just the word."),

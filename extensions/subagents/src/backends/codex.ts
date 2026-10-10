@@ -25,6 +25,7 @@ import type {
   TranscriptPart,
 } from "../domain.ts";
 import { SendError, SpawnError } from "../domain.ts";
+import { childInstructionsFor } from "../prompt.ts";
 
 const REQUEST_TIMEOUT_MS = 30_000;
 const MODEL_LIST_TIMEOUT_MS = 5_000;
@@ -894,6 +895,7 @@ const makeCodexSession = (
           capabilities: { experimentalApi: true },
         });
         writeMessage({ method: "initialized" });
+        const instructions = childInstructionsFor(task.origin);
         // Headless children cannot answer approval prompts. The caller
         // already chose to launch an autonomous subagent, so give the thread
         // full workspace access without interactive approval requests.
@@ -902,6 +904,7 @@ const makeCodexSession = (
           approvalPolicy: "never",
           sandbox: "danger-full-access",
           ...(task.model ? { model: task.model } : {}),
+          ...(instructions ? { developerInstructions: instructions } : {}),
         };
         return resumeThreadId
           ? request("thread/resume", {

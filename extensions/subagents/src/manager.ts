@@ -824,8 +824,7 @@ const makeManager = Effect.gen(function* () {
       const latest = [...records]
         .filter((record) => record.version === 1 && !entries.has(record.id))
         .sort(
-          (a, b) =>
-            (a.settledAt ?? a.createdAt) - (b.settledAt ?? b.createdAt),
+          (a, b) => (a.settledAt ?? a.createdAt) - (b.settledAt ?? b.createdAt),
         )
         .slice(-MAX_TRACKED);
       for (const record of latest) {
@@ -853,9 +852,7 @@ const makeManager = Effect.gen(function* () {
             createdAt: record.createdAt,
             // An interrupted run's real end is unknown; freeze its clock.
             settledAt: record.settledAt ?? Date.now(),
-            errorText: interrupted
-              ? INTERRUPTED_BY_SHUTDOWN
-              : record.errorText,
+            errorText: interrupted ? INTERRUPTED_BY_SHUTDOWN : record.errorText,
             meta: record.meta,
             usage: { ...record.usage },
             transcript,

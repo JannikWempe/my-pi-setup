@@ -311,7 +311,10 @@ test("persisted records restore finished and interrupted subagents", async () =>
   assert.equal(latest.find((r) => r.id === runningId)?.status, "running");
 
   await withManager(async (manager, runtime) => {
-    await runTool(runtime, manager.restore(latest, () => parent));
+    await runTool(
+      runtime,
+      manager.restore(latest, () => parent),
+    );
     const finished = manager.view.get(finishedId);
     assert.equal(finished?.status, "done");
     assert.match(finished?.finalText ?? "", /completed: Finish me/);

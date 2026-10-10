@@ -3,11 +3,7 @@ import test from "node:test";
 import { Effect } from "effect";
 import { SubagentManager } from "./src/manager.ts";
 import { claudeBackend } from "./src/backends/claude.ts";
-import type {
-  ParentContext,
-  SpawnTask,
-  SubagentRecord,
-} from "./src/domain.ts";
+import type { ParentContext, SpawnTask, SubagentRecord } from "./src/domain.ts";
 import { createSubagentRuntime, runTool } from "./src/runtime.ts";
 
 const parent: ParentContext = {
@@ -95,18 +91,20 @@ test(
         ),
       );
 
-      // Wait for streamed output so cancellation definitely lands mid-run and
-      // exercises the SDK's normal interrupt receipt/result path.
+      // Wait for the response stream to start so cancellation definitely
+      // lands mid-run and exercises the SDK's normal interrupt receipt/result
+      // path. Don't wait for text: thinking models can stream for longer than
+      // this deadline before any text (and their thinking deltas may be empty).
       const streamDeadline = Date.now() + 15_000;
       while (
         manager.view.get(started.id)?.status === "running" &&
-        !manager.view.get(started.id)?.liveAssistant?.text &&
+        !manager.view.get(started.id)?.liveAssistant &&
         Date.now() < streamDeadline
       ) {
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
       assert.equal(manager.view.get(started.id)?.status, "running");
-      assert.ok(manager.view.get(started.id)?.liveAssistant?.text);
+      assert.ok(manager.view.get(started.id)?.liveAssistant);
 
       const report = await deadline(
         runTool(runtime, manager.cancel([started.id])),
@@ -154,7 +152,10 @@ test(
     const second = createSubagentRuntime();
     try {
       const manager = await second.runPromise(SubagentManager);
-      await runTool(second, manager.restore([...records.values()], () => parent));
+      await runTool(
+        second,
+        manager.restore([...records.values()], () => parent),
+      );
       await runTool(
         second,
         manager.send(id, "What was the codeword? Reply with just the word."),

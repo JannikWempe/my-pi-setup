@@ -44,6 +44,7 @@ import {
   truncateHead,
 } from "@earendil-works/pi-coding-agent";
 import { Markdown, Text } from "@earendil-works/pi-tui";
+import { Effect, Option } from "effect";
 import { Type } from "typebox";
 import { deriveBtwTitle, isModelVisible } from "./src/by-the-way.ts";
 import {
@@ -408,6 +409,13 @@ export default function (pi: ExtensionAPI) {
         maxItems: 64,
         description: SUBAGENT_WAIT_PARAMETER_DESCRIPTIONS.ids,
       }),
+      timeout_seconds: Type.Optional(
+        Type.Number({
+          minimum: 1,
+          maximum: 3600,
+          description: SUBAGENT_WAIT_PARAMETER_DESCRIPTIONS.timeoutSeconds,
+        }),
+      ),
     }),
     async execute(_toolCallId, params, signal, onUpdate) {
       const manager = await getManager();
@@ -428,26 +436,44 @@ export default function (pi: ExtensionAPI) {
         );
       }
 
-      await runTool(
+      // The last pending set the wait reported; on timeout, these are the
+      // subagents still running (including ones mid-restart).
+      let pending: string[] = [];
+      const wait = manager.waitFor(ids, (now) => {
+        pending = now;
+        onUpdate?.({
+          content: [{ type: "text", text: `Waiting for ${now.join(", ")}...` }],
+          details: { pending: now },
+        });
+      });
+      const timeoutSeconds = params.timeout_seconds;
+      const completed = await runTool(
         getRuntime(),
-        manager.waitFor(ids, (pending) => {
-          onUpdate?.({
-            content: [
-              { type: "text", text: `Waiting for ${pending.join(", ")}...` },
-            ],
-            details: { pending },
-          });
-        }),
+        timeoutSeconds === undefined
+          ? Effect.as(wait, true)
+          : wait.pipe(
+              Effect.timeoutOption(`${timeoutSeconds} seconds`),
+              Effect.map(Option.isSome),
+            ),
         { signal, interruptMessage: "Wait aborted. Subagents keep running." },
       );
+      const stillRunning = completed ? [] : pending;
+      const settled = ids.filter((id) => !stillRunning.includes(id));
 
       // Settlement may have happened before this wait began. Remove any
       // deferred automatic delivery now that the tool is returning the result.
-      resultDelivery.consume(ids);
+      // Timed-out subagents keep their automatic delivery.
+      resultDelivery.consume(settled);
 
       const sections: string[] = [];
+      if (stillRunning.length > 0) {
+        sections.push(
+          `Timed out after ${timeoutSeconds}s; still running: ${stillRunning.join(", ")}. ` +
+            "Their results will be delivered automatically when they finish. Wait again, inspect them with subagent_check, steer them with subagent_send, or stop them with subagent_cancel.",
+        );
+      }
       let remainingBytes = WAIT_OUTPUT_MAX_BYTES;
-      for (const id of ids) {
+      for (const id of settled) {
         const snap = manager.view.get(id);
         if (!snap) {
           sections.push(`## ${id}\n\n(no longer tracked)`);

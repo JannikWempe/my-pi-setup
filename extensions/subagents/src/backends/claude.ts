@@ -34,6 +34,7 @@ import type {
   TranscriptPart,
 } from "../domain.ts";
 import { SendError, SpawnError } from "../domain.ts";
+import { childInstructionsFor } from "../prompt.ts";
 
 const CLAUDE_CONTEXT_WINDOW = 200_000;
 const INTERRUPT_TIMEOUT_MS = 2_000;
@@ -331,6 +332,7 @@ const makeClaudeSession = (
       ? THINKING_BUDGETS[task.reasoningEffort]
       : undefined;
     const claudeBinary = resolveClaudeBinary();
+    const instructions = childInstructionsFor(task.origin);
     const nativeQuery = yield* Effect.try({
       try: () =>
         query({
@@ -345,6 +347,12 @@ const makeClaudeSession = (
             // Keep child orchestration inside this extension's global manager
             // and concurrency cap rather than Claude Code's native subagents.
             disallowedTools: ["Agent", "Task"],
+            // Claude Code's own system prompt, plus the subagent role.
+            systemPrompt: {
+              type: "preset",
+              preset: "claude_code",
+              ...(instructions ? { append: instructions } : {}),
+            },
             // For cwds pi marked untrusted, restrict to user-level settings so
             // an untrusted project's config cannot reconfigure the child.
             ...(task.parent.projectTrusted
