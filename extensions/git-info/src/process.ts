@@ -51,6 +51,10 @@ export const CommandRunnerLive = Layer.effect(
           const child = ChildProcess.make(command, args, {
             cwd,
             detached: false,
+            // Background polling must never take .git/index.lock (e.g. from
+            // `git status` refreshing the index), or it races user commits/hooks.
+            env: { GIT_OPTIONAL_LOCKS: "0" },
+            extendEnv: true,
             forceKillAfter: "5 seconds",
             stdin: "ignore",
             stderr: "pipe",
