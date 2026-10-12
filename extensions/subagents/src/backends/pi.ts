@@ -63,10 +63,11 @@ type ThinkingLevel = NonNullable<
  * Resolve the generic model hint against the parent registry (v1 semantics):
  * "provider/model-id" is exact; a bare id prefers the inherited provider,
  * then must be unambiguous across providers. No hint inherits the parent
- * model; with nothing to inherit, the SDK default applies.
+ * model; with nothing to inherit, the SDK default applies. A hint may not
+ * pick an Anthropic-provider model; inheriting one from the parent is fine.
  */
-function resolvePiModel(
-  registry: ModelRegistry,
+export function resolvePiModel(
+  registry: Pick<ModelRegistry, "find" | "getAll">,
   hint: string | undefined,
   inherited: { provider: string; id: string } | undefined,
 ): Model<any> | undefined {
@@ -74,6 +75,22 @@ function resolvePiModel(
     if (!inherited) return undefined;
     return registry.find(inherited.provider, inherited.id) ?? undefined;
   }
+  const model = findPiModel(registry, hint, inherited);
+  if (model.provider === BLOCKED_PI_PROVIDER) {
+    throw new Error(
+      `Model "${model.provider}/${model.id}" is from the ${BLOCKED_PI_PROVIDER} provider, which pi subagents must not use. Use the claude harness for Claude models.`,
+    );
+  }
+  return model;
+}
+
+const BLOCKED_PI_PROVIDER = "anthropic";
+
+function findPiModel(
+  registry: Pick<ModelRegistry, "find" | "getAll">,
+  hint: string,
+  inherited: { provider: string; id: string } | undefined,
+): Model<any> {
   const slash = hint.indexOf("/");
   if (slash > 0) {
     const provider = hint.slice(0, slash);

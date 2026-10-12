@@ -26,7 +26,6 @@ claude-bridge.json
 # Pi-specific skills will be explicitly whitelisted here
 skills/*
 !skills/background-terminals/
-!skills/subagents/
 
 # Environment variables and secrets
 .env

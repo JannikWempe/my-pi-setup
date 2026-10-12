@@ -1,5 +1,6 @@
 /** All model-facing strings for the subagents tools. */
 
+import { describeDefaults, type SubagentDefaultsConfig } from "./defaults.ts";
 import type { SubagentOrigin } from "./domain.ts";
 
 /** Describes subagent_spawn, including harnesses and the fixed concurrency cap. */
@@ -14,6 +15,7 @@ export const SUBAGENT_SPAWN_PROMPT_SNIPPET =
 export const SUBAGENT_SPAWN_PROMPT_GUIDELINES = [
   "Use subagent_spawn to delegate self-contained tasks that can run in the background; give it a complete, standalone prompt.",
   "Pick the subagent harness deliberately: pi unless you have a reason to prefer Claude Code or Codex (e.g. the user asked for one, or the task suits that harness).",
+  "Omit subagent_spawn's model and reasoning_effort unless the user asked for a specific one; the configured defaults apply.",
   "After subagent_spawn, continue independent work; completed results are delivered automatically when the main session becomes idle. When blocked on a result, call subagent_wait directly: it resumes on completion without polling.",
   "Never use sleep or repeatedly poll subagent_check/subagent_list to wait for subagent completion. Use subagent_wait when blocked; reserve status checks for inspecting progress or diagnosing a problem.",
   "To follow up with an existing subagent (corrections, follow-up questions, continuing its task), use subagent_send: it keeps the subagent's full context, unlike spawning a new one.",
@@ -25,14 +27,39 @@ export const SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS = {
     "Task prompt for the subagent. Must be self-contained: include all needed context, file paths, and what to report back.",
   name: "Short human-readable name for this subagent, shown in listings and the UI",
   harness:
-    'Harness to run the subagent on: "pi" (in-process pi session; inherits this environment), "claude" (Claude Code), or "codex" (Codex CLI). Choose deliberately per task.',
+    'Harness to run the subagent on: "pi" (in-process pi session; inherits this environment), "claude" (Claude Code, also called "cc"), or "codex" (Codex CLI). Choose deliberately per task.',
   workingDir:
     "Trusted working directory for the autonomous child (default: current working directory)",
-  model:
-    'Model hint, interpreted by the chosen harness (pi: "provider/model-id" or model id; claude: model alias like "sonnet"/"opus"; codex: model slug). Omit for the harness default (pi inherits the current model).',
-  reasoningEffort:
-    "Reasoning effort on a shared scale; the harness maps it to its nearest native equivalent (pi thinking level, codex reasoning effort, claude thinking budget). Omit for the harness default (pi inherits the current level).",
 };
+
+const INVALID_DEFAULTS =
+  "Subagent defaults in settings.json are invalid, so every spawn fails until they are fixed.";
+
+/** Model parameter description, listing the defaults applied when omitted. */
+export function spawnModelDescription(config: SubagentDefaultsConfig) {
+  const defaults = config.ok
+    ? describeDefaults(config.defaults, "model", {
+        pi: "parent model",
+        claude: "Claude Code default",
+        codex: "Codex default",
+      })
+    : INVALID_DEFAULTS;
+  return `Model, interpreted by the chosen harness (pi: "provider/model-id"; claude: model alias; codex: model slug). Only set when the user asks for a specific model; an unknown model fails the spawn. Defaults when omitted: ${defaults}.`;
+}
+
+/** Reasoning-effort parameter description, listing the defaults applied when omitted. */
+export function spawnReasoningEffortDescription(
+  config: SubagentDefaultsConfig,
+) {
+  const defaults = config.ok
+    ? describeDefaults(config.defaults, "reasoningEffort", {
+        pi: "parent level",
+        claude: "Claude Code default",
+        codex: "Codex default",
+      })
+    : INVALID_DEFAULTS;
+  return `Reasoning effort on a shared scale; the harness maps it to its nearest native equivalent (pi thinking level, codex reasoning effort, claude thinking budget). Only set when the user asks for one. Defaults when omitted: ${defaults}.`;
+}
 
 /** Builds the subagent_spawn result that tells the parent model how to continue or inspect the child. */
 export function buildSubagentSpawnResult(options: {

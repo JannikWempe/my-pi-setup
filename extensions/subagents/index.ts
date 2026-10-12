@@ -46,7 +46,9 @@ import {
 import { Markdown, Text } from "@earendil-works/pi-tui";
 import { Effect, Option } from "effect";
 import { Type } from "typebox";
+import { resolvePiModel } from "./src/backends/pi.ts";
 import { deriveBtwTitle, isModelVisible } from "./src/by-the-way.ts";
+import { loadSubagentDefaults } from "./src/defaults.ts";
 import {
   BACKEND_NAMES,
   formatElapsed,
@@ -77,6 +79,8 @@ import {
   SUBAGENT_SPAWN_TOOL_DESCRIPTION,
   SUBAGENT_WAIT_PARAMETER_DESCRIPTIONS,
   SUBAGENT_WAIT_TOOL_DESCRIPTION,
+  spawnModelDescription,
+  spawnReasoningEffortDescription,
 } from "./src/prompt.ts";
 import { createDeferredResultDelivery } from "./src/result-delivery.ts";
 import {
@@ -169,6 +173,8 @@ export default function (pi: ExtensionAPI) {
   let ui: ExtensionUIContext | undefined;
   let unsubStatus: (() => void) | undefined;
   const resultDelivery = createDeferredResultDelivery<SubagentSnapshot>();
+  const settingsPath = path.join(getAgentDir(), "settings.json");
+  const defaultsConfig = loadSubagentDefaults(settingsPath);
 
   const getRuntime = () => (runtime ??= createSubagentRuntime());
 
@@ -283,6 +289,19 @@ export default function (pi: ExtensionAPI) {
     modelRegistry: ctx.modelRegistry,
   });
 
+  /** Surface a broken config at startup instead of on the first spawn. */
+  const checkDefaults = (ctx: ExtensionContext) => {
+    if (!defaultsConfig.ok) return `Subagents: ${defaultsConfig.error}`;
+    const piModel = defaultsConfig.defaults.pi?.model;
+    if (!piModel) return undefined;
+    try {
+      resolvePiModel(ctx.modelRegistry, piModel, undefined);
+      return undefined;
+    } catch (error) {
+      return `Subagents: subagents.defaults.pi.model in ${settingsPath}: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  };
+
   const onPersist = (record: SubagentRecord) => {
     // Never append into a session whose extension runtime is closing.
     if (!sessionContext) return;
@@ -292,6 +311,8 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     sessionContext = ctx;
     if (ctx.hasUI) ui = ctx.ui;
+    const defaultsError = checkDefaults(ctx);
+    if (defaultsError && ctx.hasUI) ctx.ui.notify(defaultsError, "error");
     const records = readSubagentRecords(ctx);
     if (records.length === 0) return;
     const manager = await getManager();
@@ -344,18 +365,26 @@ export default function (pi: ExtensionAPI) {
       ),
       model: Type.Optional(
         Type.String({
-          description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.model,
+          description: spawnModelDescription(defaultsConfig),
         }),
       ),
       reasoning_effort: Type.Optional(
         StringEnum(REASONING_EFFORTS, {
-          description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.reasoningEffort,
+          description: spawnReasoningEffortDescription(defaultsConfig),
         }),
       ),
     }),
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      if (!defaultsConfig.ok) {
+        throw new Error(
+          `Subagent defaults are invalid: ${defaultsConfig.error} Fix the file, then /reload.`,
+        );
+      }
       const manager = await getManager();
       const harness = params.harness;
+      const defaults = defaultsConfig.defaults[harness];
+      const modelFromDefaults =
+        params.model === undefined && defaults?.model !== undefined;
 
       const cwd = path.resolve(ctx.cwd, params.working_dir ?? ".");
       if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) {
@@ -363,18 +392,29 @@ export default function (pi: ExtensionAPI) {
       }
 
       const title = params.name.trim().slice(0, 160) || "subagent";
-      const snap = await runTool(
-        getRuntime(),
-        manager.spawn(harness, {
-          prompt: params.prompt,
-          title,
-          cwd,
-          model: params.model,
-          reasoningEffort: params.reasoning_effort,
-          parent: parentContextFor(ctx, cwd),
-        }),
-        { signal, interruptMessage: "Subagent spawn aborted." },
-      );
+      let snap: SubagentSnapshot;
+      try {
+        snap = await runTool(
+          getRuntime(),
+          manager.spawn(harness, {
+            prompt: params.prompt,
+            title,
+            cwd,
+            model: params.model ?? defaults?.model,
+            reasoningEffort:
+              params.reasoning_effort ?? defaults?.reasoningEffort,
+            parent: parentContextFor(ctx, cwd),
+          }),
+          { signal, interruptMessage: "Subagent spawn aborted." },
+        );
+      } catch (error) {
+        // Point at the config, not the caller, when the default is to blame.
+        if (!modelFromDefaults) throw error;
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(
+          `${message}\nThe model came from subagents.defaults.${harness}.model in ${settingsPath}.`,
+        );
+      }
 
       return {
         content: [
@@ -384,7 +424,9 @@ export default function (pi: ExtensionAPI) {
               id: snap.id,
               title: snap.title,
               harness,
-              modelLabel: snap.meta.modelLabel ?? "?",
+              modelLabel:
+                (snap.meta.modelLabel ?? "?") +
+                (modelFromDefaults ? " from settings defaults" : ""),
               cwd,
             }),
           },
