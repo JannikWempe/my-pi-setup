@@ -1,13 +1,11 @@
 {
   "name": "ui-customization",
   "scripts": {
-    "check": "tsc --noEmit -p .",
-    "prepare": "effect-tsgo patch"
+    "check": "tsc --noEmit -p ."
   },
   "type": "module",
   "private": true,
   "devDependencies": {
-    "@effect/tsgo": "^0.19.0",
     "typescript": "^7.0.2"
   }
 }
