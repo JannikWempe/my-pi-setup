@@ -2,6 +2,7 @@ import type {
   ExtensionAPI,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import { estimateTokens } from "@earendil-works/pi-coding-agent";
 import {
   emptyModelInfoState,
   MODEL_INFO_CHANNEL,
@@ -21,6 +22,16 @@ function getSessionCost(ctx: ExtensionContext) {
   }
 
   return cost;
+}
+
+// pi reports unknown context usage after compaction until the next response;
+// fall back to a heuristic estimate of the projected context in the meantime.
+function estimateProjectedContextTokens(ctx: ExtensionContext) {
+  let tokens = 0;
+  for (const message of ctx.sessionManager.buildSessionProjection().messages) {
+    tokens += estimateTokens(message);
+  }
+  return tokens;
 }
 
 function estimateContentTokens(characters: number) {
@@ -46,6 +57,10 @@ export default function modelInfo(pi: ExtensionAPI) {
     currentContext = ctx;
     const model = ctx.model;
     const usage = ctx.getContextUsage();
+    const contextWindow = usage?.contextWindow ?? model?.contextWindow ?? 0;
+    const contextTokens =
+      usage?.tokens ??
+      (contextWindow > 0 ? estimateProjectedContextTokens(ctx) : null);
 
     state = {
       ...state,
@@ -53,9 +68,12 @@ export default function modelInfo(pi: ExtensionAPI) {
       modelId: model?.id ?? "no-model",
       modelName: model?.name ?? model?.id ?? "No model",
       thinking: model?.reasoning ? pi.getThinkingLevel() : "off",
-      contextTokens: usage?.tokens ?? null,
-      contextWindow: usage?.contextWindow ?? model?.contextWindow ?? 0,
-      contextPercent: usage?.percent ?? null,
+      contextTokens,
+      contextWindow,
+      contextPercent:
+        contextTokens !== null && contextWindow > 0
+          ? (contextTokens / contextWindow) * 100
+          : null,
       cost: getSessionCost(ctx),
     };
     publish();
@@ -197,6 +215,8 @@ export default function modelInfo(pi: ExtensionAPI) {
   });
 
   pi.on("turn_end", (_event, ctx) => refresh(ctx));
+
+  pi.on("session_compact", (_event, ctx) => refresh(ctx));
 
   pi.on("agent_settled", (_event, ctx) => {
     state = { ...state, generating: false };
