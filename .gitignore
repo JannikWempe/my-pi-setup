@@ -44,3 +44,4 @@ skills/*
 .vscode/
 .idea/
 /skills/code-review
+/mcp.json
