@@ -11,8 +11,19 @@ import type {
   KeybindingsManager,
   Theme,
 } from "@earendil-works/pi-coding-agent";
-import type { Component, Focusable, TUI } from "@earendil-works/pi-tui";
-import { Input, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import type {
+  Component,
+  Focusable,
+  TUI,
+  TuiMouseEvent,
+  TuiMouseEventResult,
+} from "@earendil-works/pi-tui";
+import {
+  Input,
+  matchesKey,
+  truncateToWidth,
+  visibleWidth,
+} from "@earendil-works/pi-tui";
 import { formatElapsed, type SubagentSnapshot } from "../domain.ts";
 import { formatContextUtilization } from "../format.ts";
 import type { SubagentReadModel } from "../manager.ts";
@@ -462,32 +473,46 @@ class TakeoverView implements Component, Focusable {
       return;
     }
     if (this.keybindings.matches(data, "tui.editor.cursorUp")) {
-      this.scrollOffset += TRANSCRIPT_SCROLL_STEP;
-      this.tui.requestRender();
+      this.scrollBy(TRANSCRIPT_SCROLL_STEP);
       return;
     }
     if (this.keybindings.matches(data, "tui.editor.cursorDown")) {
-      this.scrollOffset = Math.max(
-        0,
-        this.scrollOffset - TRANSCRIPT_SCROLL_STEP,
-      );
-      this.tui.requestRender();
+      this.scrollBy(-TRANSCRIPT_SCROLL_STEP);
+      return;
+    }
+    // Vim-style half-page scrolling. Shadows the input's ctrl+u/ctrl+d
+    // line edits, which matter little in a one-line steering prompt.
+    if (matchesKey(data, "ctrl+u")) {
+      this.scrollBy(Math.ceil(this.viewportHeight() / 2));
+      return;
+    }
+    if (matchesKey(data, "ctrl+d")) {
+      this.scrollBy(-Math.ceil(this.viewportHeight() / 2));
       return;
     }
     if (this.keybindings.matches(data, "tui.editor.pageUp")) {
-      this.scrollOffset += this.viewportHeight();
-      this.tui.requestRender();
+      this.scrollBy(this.viewportHeight());
       return;
     }
     if (this.keybindings.matches(data, "tui.editor.pageDown")) {
-      this.scrollOffset = Math.max(
-        0,
-        this.scrollOffset - this.viewportHeight(),
-      );
-      this.tui.requestRender();
+      this.scrollBy(-this.viewportHeight());
       return;
     }
     this.input.handleInput(data);
+    this.tui.requestRender();
+  }
+
+  /** Fullscreen mode routes wheel events to the overlay under the pointer. */
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    if (event.type !== "wheel" || !event.wheelDelta) return undefined;
+    // Negative wheelDelta scrolls up, i.e. away from the bottom.
+    this.scrollBy(-event.wheelDelta);
+    return { handled: true };
+  }
+
+  /** Positive lines scroll up into history; render() clamps the top. */
+  private scrollBy(lines: number) {
+    this.scrollOffset = Math.max(0, this.scrollOffset + lines);
     this.tui.requestRender();
   }
 
@@ -554,7 +579,7 @@ class TakeoverView implements Component, Focusable {
     if (this.scrollOffset > 0) {
       body.push(
         truncateToWidth(
-          theme.fg("dim", `... ${this.scrollOffset} lines below · ↓/pgdn`),
+          theme.fg("dim", `... ${this.scrollOffset} lines below · ↓/ctrl+d`),
           width,
         ),
       );
@@ -568,7 +593,7 @@ class TakeoverView implements Component, Focusable {
       truncateToWidth(
         theme.fg(
           "dim",
-          `${configuredKeys(this.keybindings, "tui.input.submit")} send · ${configuredKeys(this.keybindings, "app.interrupt")} back · ${configuredKeys(this.keybindings, "app.clear")} abort run · ${configuredKeys(this.keybindings, "tui.editor.cursorUp")}/${configuredKeys(this.keybindings, "tui.editor.cursorDown")} scroll · ${configuredKeys(this.keybindings, "tui.editor.pageUp")}/${configuredKeys(this.keybindings, "tui.editor.pageDown")} page`,
+          `${configuredKeys(this.keybindings, "tui.input.submit")} send · ${configuredKeys(this.keybindings, "app.interrupt")} back · ${configuredKeys(this.keybindings, "app.clear")} abort run · ${configuredKeys(this.keybindings, "tui.editor.cursorUp")}/${configuredKeys(this.keybindings, "tui.editor.cursorDown")}/wheel scroll · ctrl+u/ctrl+d half page`,
         ),
         width,
       ),
