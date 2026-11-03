@@ -27,7 +27,6 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { StringEnum } from "@earendil-works/pi-ai";
 import type {
   ExtensionAPI,
   ExtensionCommandContext,
@@ -91,6 +90,19 @@ import {
 import { openSubagentPicker, openSubagentTakeover } from "./src/ui/takeover.ts";
 
 const SUBAGENT_RECORD_ENTRY = "subagent-record";
+
+// Same `{ type: "string", enum }` schema as pi-ai's StringEnum, which since
+// pi 1.5 returns a pi-schema Schema that Type.Object cannot infer through.
+function StringEnum<T extends readonly string[]>(
+  values: T,
+  options?: { description?: string },
+) {
+  return Type.Unsafe<T[number]>({
+    type: "string",
+    enum: [...values],
+    ...options,
+  });
+}
 const SUBAGENT_OUTPUT_MAX_BYTES = 24 * 1024;
 const WAIT_OUTPUT_MAX_BYTES = 48 * 1024;
 const WAIT_PER_AGENT_MAX_BYTES = 16 * 1024;
