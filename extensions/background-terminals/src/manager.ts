@@ -108,6 +108,9 @@ export interface StartOptions {
   readonly command: string;
   readonly title: string;
   readonly cwd: string;
+  /** The `shellCommandPrefix` setting, run before the command on POSIX like
+   * the built-in bash tool does, so both shells see the same environment. */
+  readonly commandPrefix?: string;
 }
 
 export interface KillResult {
@@ -168,12 +171,13 @@ export class TerminalManager extends Context.Service<
 
 // --- Process helpers ------------------------------------------------------------
 
-function shellInvocation(command: string) {
+function shellInvocation(command: string, prefix?: string) {
   if (process.platform === "win32") {
     const shell = process.env.ComSpec ?? "cmd.exe";
     return { shell, args: ["/d", "/s", "/c", command] };
   }
-  return { shell: "/bin/sh", args: ["-c", command] };
+  const resolved = prefix ? `${prefix}\n${command}` : command;
+  return { shell: "/bin/sh", args: ["-c", resolved] };
 }
 
 /** Signal the whole process group on POSIX so descendants (servers a shell
@@ -551,7 +555,10 @@ const makeManager = Effect.gen(function* () {
       );
 
       const doStart = Effect.gen(function* () {
-        const { shell, args } = shellInvocation(options.command);
+        const { shell, args } = shellInvocation(
+          options.command,
+          options.commandPrefix,
+        );
         const child = yield* Effect.try({
           try: () =>
             spawn(shell, args, {

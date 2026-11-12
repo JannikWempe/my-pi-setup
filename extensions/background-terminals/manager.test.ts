@@ -140,6 +140,25 @@ test("happy path: stdout and stderr captured separately, settles done, hook fire
   });
 });
 
+test("commandPrefix runs before the command but stays out of the snapshot", async () => {
+  await withManager(async (manager, runtime) => {
+    const snap = await runTool(
+      runtime,
+      manager.start({
+        command: 'echo "$BG_PREFIX_PROBE"',
+        title: "prefix",
+        cwd,
+        commandPrefix: "export BG_PREFIX_PROBE=from-prefix",
+      }),
+    );
+    assert.equal(snap.command, 'echo "$BG_PREFIX_PROBE"');
+
+    const { snap: done } = await settlement(manager, snap.id);
+    assert.equal(done.status, "done");
+    assert.equal(done.stdout.text, "from-prefix\n");
+  });
+});
+
 test("non-zero exit settles as failed with the exit code", async () => {
   await withManager(async (manager, runtime) => {
     const snap = await runTool(

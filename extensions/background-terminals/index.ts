@@ -239,7 +239,12 @@ export default function (pi: ExtensionAPI) {
         params.title.replace(/\s+/g, " ").trim().slice(0, 80) || "terminal";
       const snap = await runTool(
         getRuntime(),
-        manager.start({ command, title, cwd }),
+        manager.start({
+          command,
+          title,
+          cwd,
+          commandPrefix: pi.getSettings().shellCommandPrefix,
+        }),
       );
 
       return {
